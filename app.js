@@ -55,40 +55,6 @@
         'CRP': { ukrName: 'С-реактивний білок', code: 'CRP', unit: 'мг/л', min: 0.0, max: 5.0 }
     };
 
-    // Flag Dictionary (Russian -> Ukrainian)
-    const FLAG_DICTIONARY = {
-        'Незрелые клетки?': 'Незрілі клітини?',
-        'Незрелые клетки': 'Незрілі клітини',
-        'Аномальные/атипичные лимфоциты?': 'Аномальні/атипові лімфоцити?',
-        'Аномальные/атипичные лимфоциты': 'Аномальні/атипові лімфоцити',
-        'Атипичные лимфоциты?': 'Атипові лімфоцити?',
-        'Лимфоцитоз': 'Лімфоцитоз',
-        'Лимфопения': 'Лімфопенія',
-        'Нейтрофилез': 'Нейтрофільоз',
-        'Нейтропения': 'Нейтропенія',
-        'Моноцитоз': 'Моноцитоз',
-        'Эозинофилия': 'Еозинофілія',
-        'Базофилия': 'Базофілія',
-        'Сдвиг влево?': 'Зсув ліворуч?',
-        'Сдвиг влево': 'Зсув ліворуч',
-        'Лейкоцитоз': 'Лейкоцитоз',
-        'Лейкопения': 'Лейкопенія',
-        'Сгусток RBC?': 'Згусток RBC?',
-        'Сгусток RBC': 'Згусток RBC',
-        'Анизоцитоз': 'Анізоцитоз',
-        'Микроцитоз': 'Мікроцитоз',
-        'Макроцитоз': 'Макроцитоз',
-        'Гипохромия': 'Гіпохромія',
-        'Эритроцитоз': 'Еритроцитоз',
-        'Анемия': 'Анемія',
-        'Двугорбый RBC?': 'Двогорбий RBC?',
-        'Тромбоцитопения': 'Тромбоцитопенія',
-        'Тромбоцитоз': 'Тромбоцитоз',
-        'Сгусток PLT?': 'Згусток PLT?',
-        'Агрегаты тромбоцитов?': 'Агрегати тромбоцитів?',
-        'Крупные тромбоциты?': 'Великі тромбоцити?'
-    };
-
     /* ==========================================================================
        NATIVE INDEXEDDB LOCAL STORAGE MANAGER (FULL DATA BASE64 PERSISTENCE)
        ========================================================================== */
@@ -192,27 +158,6 @@
             return { dateStr: `${dateOnlyMatch[1]}.${dateOnlyMatch[2]}.${dateOnlyMatch[3]}`, timeStr: '—' };
         }
         return { dateStr: rawTimeStr, timeStr: '—' };
-    }
-
-    // Helper: Translate compound flag strings
-    function translateFlagString(rawFlagStr) {
-        if (!rawFlagStr || !rawFlagStr.trim()) return '';
-
-        const parts = rawFlagStr.split(/[\.,;]+/).map(p => p.trim()).filter(p => p.length > 0);
-        const translatedParts = parts.map(part => {
-            if (FLAG_DICTIONARY[part]) return FLAG_DICTIONARY[part];
-            if (FLAG_DICTIONARY[part + '?']) return FLAG_DICTIONARY[part + '?'];
-
-            let res = part;
-            Object.keys(FLAG_DICTIONARY).forEach(key => {
-                if (res.includes(key)) {
-                    res = res.replaceAll(key, FLAG_DICTIONARY[key]);
-                }
-            });
-            return res;
-        });
-
-        return translatedParts.join('. ');
     }
 
     // Evaluate patient health status & count abnormal parameters
@@ -765,19 +710,13 @@
     }
 
     /* ==========================================================================
-       PRIMARY FULL CLINICAL REPORT GENERATOR (PERFECT 100% PERSISTENT BASE64 IMAGES)
+       PRIMARY FULL CLINICAL REPORT GENERATOR (YELLOW ALERTS REMOVED COMPLETELY)
        ========================================================================== */
     function generateReportHTML(patient) {
         const fullName = `${patient['Фамилия'] || ''} ${patient['Имя'] || ''}`.trim() || 'Пацієнт';
         const sampleID = patient['ID образца.'] || '—';
         const rawTestTime = patient['Вр.измер.'] || patient['Время взят.пр.'] || '—';
         const { dateStr, timeStr } = splitUkrainianDateTime(rawTestTime);
-
-        // Collect Flags & Translate to Ukrainian
-        const rawFlags = [patient['WBC Flag'], patient['RBC Flag'], patient['PLT Flag'], patient['CRP Flag']]
-            .filter(f => f && f.trim() !== '');
-        const translatedFlags = rawFlags.map(f => translateFlagString(f)).filter(f => f.length > 0);
-        const alertsText = translatedFlags.join('; ');
 
         // 100% Persistent Base64 Images
         const { wbcImg, rbcImg, pltImg, diffImg } = getPatientImages(patient);
@@ -844,13 +783,6 @@
                         <div><strong>Дата:</strong> ${dateStr}</div>
                     </div>
                 </div>
-
-                <!-- Single-Line Inline Alerts Box if present -->
-                ${alertsText ? `
-                    <div class="alerts-box-inline">
-                        <strong>⚠️ Системні флаги та попередження:</strong> ${alertsText}
-                    </div>
-                ` : ''}
 
                 <!-- Results Table (Col Widths: 34%, 12%, 16%, 18%, 20%) -->
                 <div class="results-section">

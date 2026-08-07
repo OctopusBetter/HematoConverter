@@ -553,7 +553,7 @@ body {
 }
 
 /* ==========================================================================
-   OUR BEAUTIFUL COLORFUL CLINICAL A4 REPORT SHEET DESIGN (PROPORTIONED)
+   OUR BEAUTIFUL COLORFUL CLINICAL A4 REPORT SHEET DESIGN
    ========================================================================== */
 
 .report-wrapper {
@@ -645,24 +645,6 @@ body {
     font-family: 'Roboto Mono', monospace;
     font-size: 8.8pt;
     color: #334155;
-}
-
-/* Single-Line Inline Amber Alerts Box */
-.alerts-box-inline {
-    border: 1px solid #f59e0b;
-    background: #fffbeb;
-    padding: 3px 8px;
-    border-radius: 4px;
-    margin-bottom: 5px;
-    font-size: 8.2pt;
-    color: #78350f;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.alerts-box-inline strong {
-    color: #b45309;
 }
 
 /* Results Main Table */
