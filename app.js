@@ -311,6 +311,42 @@
         });
     }
 
+
+    /* Bidirectional Auto-Reconciliation (Pairs standalone biochem with newly loaded CBC or vice versa) */
+    function autoReconcileAllPatients() {
+        const standaloneBiochems = parsedPatients.filter(p => p._isStandaloneBiochem);
+        const hematologyPatients = parsedPatients.filter(p => !p._isStandaloneBiochem);
+
+        const biochemsToRemove = new Set();
+
+        standaloneBiochems.forEach(b => {
+            const bDate = extractComparableDate(b['Дата'] || b['Вр.измер.'] || b['Время взят.пр.']);
+            const bSurname = b['Фамилия'] || b['ФИО'] || b['Имя'] || '';
+
+            const candidates = hematologyPatients.filter(p => {
+                if (p._hasBiochem) return false;
+                const pDate = extractComparableDate(p['Вр.измер.'] || p['Время взят.пр.'] || p['Дата']);
+                const pSurname = p['Фамилия'] || p['Имя'] || '';
+                const dateMatches = (!bDate || !pDate || bDate === pDate);
+                return dateMatches && isSurnameMatch(pSurname, bSurname);
+            });
+
+            if (candidates.length === 1) {
+                const target = candidates[0];
+                if (b['Glu']) target['Glu'] = b['Glu'];
+                if (b['GGT']) target['GGT'] = b['GGT'];
+                target._hasBiochem = true;
+                target._biochemSource = b._biochemSource || b;
+                evaluatePatientHealthStatus(target);
+                biochemsToRemove.add(b.uniqueKey);
+            }
+        });
+
+        if (biochemsToRemove.size > 0) {
+            parsedPatients = parsedPatients.filter(p => !biochemsToRemove.has(p.uniqueKey));
+        }
+    }
+
     function unlinkCurrentPatientBiochem() {
         const patient = filteredPatients[currentPatientIndex];
         if (!patient || !patient._hasBiochem || patient._isStandaloneBiochem) return;
@@ -689,6 +725,9 @@
         if (newBiochemRecords.length > 0) {
             mergeBiochemistryRecords(newBiochemRecords);
         }
+
+        // Bidirectional Auto-Reconciliation (handles uploading Biochem first, then Hematology, or vice versa)
+        autoReconcileAllPatients();
 
         // Evaluate Health Status & Sort Abnormal Patients to TOP
         parsedPatients.forEach(p => evaluatePatientHealthStatus(p));
