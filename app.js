@@ -16,9 +16,7 @@
     let activeDateFilter = 'ALL';
     let activeStatusFilter = 'ALL'; // 'ALL', 'ABNORMAL', 'NORMAL'
     let db = null; // Native IndexedDB instance
-    let unmatchedBiochemList = [];
     let activeModalBiochemItem = null;
-    let unmatchedBiochemSection, unmatchedBiochemListEl, unmatchedCount, unmatchedHeader;
     let linkModal, modalTitle, modalBiochemDetails, closeModalBtn, modalPatientSearch, modalPatientList;
     let customContextMenu, unlinkBiochemBtn;
 
@@ -68,15 +66,12 @@
        ========================================================================== */
     function initDB(callback) {
         if (!window.indexedDB) { if (callback) callback(); return; }
-        const request = indexedDB.open('HematologyConverterDB', 2);
+        const request = indexedDB.open('HematologyConverterDB', 1);
 
         request.onupgradeneeded = function (e) {
             const database = e.target.result;
             if (!database.objectStoreNames.contains('patientsStore')) {
                 database.createObjectStore('patientsStore', { keyPath: 'uniqueKey' });
-            }
-            if (!database.objectStoreNames.contains('unmatchedBiochemStore')) {
-                database.createObjectStore('unmatchedBiochemStore', { keyPath: 'uniqueKey' });
             }
         };
 
@@ -127,15 +122,6 @@
                 populateDateFilterOptions();
                 updateUI();
             }
-            try {
-                const bTransaction = db.transaction(['unmatchedBiochemStore'], 'readonly');
-                const bStore = bTransaction.objectStore('unmatchedBiochemStore');
-                const bReq = bStore.getAll();
-                bReq.onsuccess = function (evt) {
-                    unmatchedBiochemList = evt.target.result || [];
-                    renderUnmatchedBiochemSection();
-                };
-            } catch (err) {}
             if (callback) callback();
         };
     }
@@ -309,11 +295,6 @@
         if (statusFilterSelect) statusFilterSelect.addEventListener('change', handleStatusFilterChange);
         if (clearDbBtn) clearDbBtn.addEventListener('click', clearDatabase);
         unlinkBiochemBtn = document.getElementById('unlinkBiochemBtn');
-        unmatchedBiochemSection = document.getElementById('unmatchedBiochemSection');
-        unmatchedBiochemListEl = document.getElementById('unmatchedBiochemList');
-        unmatchedCount = document.getElementById('unmatchedCount');
-        unmatchedHeader = document.getElementById('unmatchedHeader');
-
         linkModal = document.getElementById('linkModal');
         modalTitle = document.getElementById('modalTitle');
         modalBiochemDetails = document.getElementById('modalBiochemDetails');
@@ -323,7 +304,6 @@
         customContextMenu = document.getElementById('customContextMenu');
 
         if (unlinkBiochemBtn) unlinkBiochemBtn.addEventListener('click', unlinkCurrentPatientBiochem);
-        if (unmatchedHeader) unmatchedHeader.addEventListener('click', () => unmatchedBiochemSection.classList.toggle('collapsed'));
         if (closeModalBtn) closeModalBtn.addEventListener('click', closeLinkModal);
         if (linkModal) linkModal.addEventListener('click', (e) => { if (e.target === linkModal) closeLinkModal(); });
         if (modalPatientSearch) modalPatientSearch.addEventListener('input', (e) => populateModalPatientList(e.target.value));
@@ -473,23 +453,19 @@
             }
         });
 
-        // Merge Biochemistry Records with Hematology Patients (Smart Auto-Match)
-        if (newBiochemRecords.length > 0 || unmatchedBiochemList.length > 0) {
-            const allBiochemToMatch = newBiochemRecords.concat(unmatchedBiochemList);
-            unmatchedBiochemList = [];
-            mergeBiochemistryRecords(allBiochemToMatch);
+        // Merge Biochemistry Records with Hematology Patients (or add as standalone biochem patients)
+        if (newBiochemRecords.length > 0) {
+            mergeBiochemistryRecords(newBiochemRecords);
         }
 
         // Evaluate Health Status & Sort Abnormal Patients to TOP
         parsedPatients.forEach(p => evaluatePatientHealthStatus(p));
         parsedPatients = sortPatientsByHealthStatus(parsedPatients);
 
-        // Persist to native IndexedDB
+        // Persist to native IndexedDB (with full Base64 images!)
         savePatientsToDB(parsedPatients);
-        saveUnmatchedBiochemToDB(unmatchedBiochemList);
 
-        const statusText = `Успішно завантажено та збережено ${parsedPatients.length} пацієнтів з графіками` + 
-                           (unmatchedBiochemList.length > 0 ? ` (неприв'язаної біохімії: ${unmatchedBiochemList.length})` : '');
+        const statusText = `Успішно завантажено та збережено ${parsedPatients.length} пацієнтів з графіками`;
         mainFolderStatus.textContent = statusText;
         compactFolderText.textContent = statusText;
 
@@ -723,7 +699,8 @@
         filteredPatients.forEach((patient, idx) => {
             const fullName = `${patient['Фамилия'] || ''} ${patient['Имя'] || ''}`.trim() || 'Без імені';
             const sampleID = patient['ID образца.'] || `№${idx + 1}`;
-            const { dateStr, timeStr } = splitUkrainianDateTime(patient['Вр.измер.'] || patient['Время взят.пр.'] || patient['Дата'] || '');
+            const rawTime = patient['Вр.измер.'] || patient['Время взят.пр.'] || patient['Дата'] || '';
+            const { dateStr, timeStr } = splitUkrainianDateTime(rawTime);
 
             let badgeHTML = '<span class="status-indicator-badge normal">✅ В нормі</span>';
             let abnormalClass = '';
@@ -733,9 +710,12 @@
                 abnormalClass = 'item-abnormal';
             }
 
-            let biochemBadgeHTML = patient._hasBiochem 
-                ? `<span class="status-indicator-badge" style="background:rgba(168,85,247,0.2);color:#d8b4fe;border:1px solid rgba(168,85,247,0.4);margin-left:4px;" title="Підключено показники біохімії (Glu, GGT)">🧪 +Біохімія</span>`
-                : '';
+            let biochemBadgeHTML = '';
+            if (patient._isStandaloneBiochem) {
+                biochemBadgeHTML = `<span class="status-indicator-badge" style="background:rgba(168,85,247,0.25);color:#d8b4fe;border:1px solid rgba(168,85,247,0.45);margin-left:4px;" title="Окремий аналіз біохімії (Mindray BS-230)">🧪 Біохімія</span>`;
+            } else if (patient._hasBiochem) {
+                biochemBadgeHTML = `<span class="status-indicator-badge" style="background:rgba(168,85,247,0.2);color:#d8b4fe;border:1px solid rgba(168,85,247,0.4);margin-left:4px;" title="Підключено показники біохімії (Glu, GGT)">🧪 +Біохімія</span>`;
+            }
 
             const li = document.createElement('li');
             li.className = `patient-item ${abnormalClass} ${idx === currentPatientIndex ? 'active' : ''}`;
@@ -762,7 +742,16 @@
             li.addEventListener('contextmenu', (e) => {
                 e.preventDefault();
                 const menuItems = [];
-                if (patient._hasBiochem) {
+                if (patient._isStandaloneBiochem) {
+                    menuItems.push({
+                        label: "🔗 Приєднати до гематології (CBC)...",
+                        action: () => openLinkModal(patient)
+                    });
+                    menuItems.push({
+                        label: "🗑️ Видалити цей аналіз біохімії",
+                        action: () => deletePatientRecord(patient)
+                    });
+                } else if (patient._hasBiochem) {
                     menuItems.push({
                         label: "✕ Від'єднати біохімію (розділити)",
                         action: () => {
@@ -916,7 +905,7 @@
                         <h2 class="report-main-title">ЗВІТ ЛАБОРАТОРНОГО ДОСЛІДЖЕННЯ</h2>
                     </div>
                     <div class="header-right-info">
-                        <div class="test-type-sub">Загальний аналіз крові (CBC + 5-DIFF)${patient._hasBiochem ? ' + Біохімія' : ''}</div>
+                        <div class="test-type-sub">${patient._isStandaloneBiochem ? 'Біохімічний аналіз (ГГТ, Глю)' : ('Загальний аналіз крові (CBC + 5-DIFF)' + (patient._hasBiochem ? ' + Біохімія' : ''))}</div>
                         <div class="facility-name">Заклад: МСЧ АРЗ СП ГУ ДСНС України у Харківській області</div>
                     </div>
                 </div>
@@ -953,6 +942,7 @@
                     </table>
                 </div>
 
+${patient._isStandaloneBiochem ? '' : `
                 <!-- Graphics (Scattergram + Histograms) -->
                 <div class="graphics-section">
                     <div class="graphics-title">Графічний розподіл клітин (Скаттерграми та гістограми)</div>
@@ -974,7 +964,7 @@
                             <div class="chart-label">Гістограма PLT</div>
                         </div>
                     </div>
-                </div>
+                </div>`}
 
                 <!-- Signatures -->
                 <div class="report-footer">

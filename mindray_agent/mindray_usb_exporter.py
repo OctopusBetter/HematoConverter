@@ -30,7 +30,7 @@ CANDIDATE_DIRS = [
 
 def get_mindray_dir():
     for p in CANDIDATE_DIRS:
-        if os.path.exists(p):
+        if os.path.exists(os.path.join(p, "PrintOutput")) or os.path.exists(os.path.join(p, "DataBase")):
             return p
     return CANDIDATE_DIRS[0]
 

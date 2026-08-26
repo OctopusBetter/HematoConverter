@@ -6,7 +6,21 @@ MINDRAY BS-230 STANDALONE EXPORT ENGINE (PowerShell / .NET Native)
 ==============================================================================
 #>
 
-$MindrayInstallDir = "D:\Mindray\BS230\OperationSoft"
+$CandidateDirs = @(
+    "D:\mindray\Mindray\BS230\OperationSoft",
+    "D:\Mindray\BS230\OperationSoft",
+    "C:\Mindray\BS230\OperationSoft",
+    "C:\Mindray\BS240\OperationSoft",
+    "D:\Mindray\BS240\OperationSoft"
+)
+
+$MindrayInstallDir = $CandidateDirs[0]
+foreach ($p in $CandidateDirs) {
+    if ((Test-Path (Join-Path $p "PrintOutput")) -or (Test-Path (Join-Path $p "DataBase"))) {
+        $MindrayInstallDir = $p
+        break
+    }
+}
 $SqlInstance = ".\BS240"
 $SqlDb = "BA80"
 $SqlUser = "sa"
