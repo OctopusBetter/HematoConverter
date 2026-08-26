@@ -285,18 +285,6 @@ def export_to_drive(drive_root):
                 "BIOCHEM"
             ])
 
-    base_dir = get_mindray_dir()
-    bak_source = os.path.join(base_dir, "DataBase", "Backup", "BA80.bak")
-    if not os.path.exists(bak_source):
-        bak_source = os.path.join(base_dir, "DataBase", "BA80.bak")
-
-    if os.path.exists(bak_source):
-        bak_target = os.path.join(target_dir, "BA80_Backup.bak")
-        try:
-            shutil.copy2(bak_source, bak_target)
-        except Exception:
-            pass
-
     return len(patients)
 
 

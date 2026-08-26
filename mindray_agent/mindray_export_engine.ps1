@@ -183,15 +183,6 @@ function Export-MindrayDataToDrive($driveRoot) {
     }
     [System.IO.File]::WriteAllLines($csvPath, $csvLines, [System.Text.Encoding]::UTF8)
 
-    # 4. Копіювання BA80.bak
-    $bakSource = Join-Path $MindrayInstallDir "DataBase\Backup\BA80.bak"
-    if (-not (Test-Path $bakSource)) {
-        $bakSource = Join-Path $MindrayInstallDir "DataBase\BA80.bak"
-    }
-    if (Test-Path $bakSource) {
-        Copy-Item -Path $bakSource -Destination (Join-Path $targetDir "BA80_Backup.bak") -Force -ErrorAction SilentlyContinue
-    }
-
     return $patientsMap.Count
 }
 
