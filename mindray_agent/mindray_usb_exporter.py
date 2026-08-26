@@ -40,7 +40,7 @@ SQL_DB = "BA80"
 SQL_USER = "sa"
 SQL_PASS = "MINDRAY#BS800"
 
-EXPORT_FOLDER_NAME = "Mindray_BS230_Export"
+EXPORT_FOLDER_NAME = "SCAN_00"
 processed_drives = set()
 
 

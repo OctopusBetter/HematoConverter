@@ -25,7 +25,7 @@ $SqlInstance = ".\BS240"
 $SqlDb = "BA80"
 $SqlUser = "sa"
 $SqlPass = "MINDRAY#BS800"
-$ExportFolderName = "Mindray_BS230_Export"
+$ExportFolderName = "SCAN_00"
 
 $processedDrives = [System.Collections.Generic.HashSet[string]]::new()
 
