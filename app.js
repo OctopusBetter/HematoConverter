@@ -247,6 +247,238 @@
         });
     }
 
+
+    /* ==========================================================================
+       BIOCHEMISTRY MERGING, STANDALONE RECORDS & LINKING
+       ========================================================================== */
+    function mergeBiochemistryRecords(biochemRecords) {
+        biochemRecords.forEach(b => {
+            const bDate = extractComparableDate(b['Дата'] || b['Вр.измер.'] || b['Время взят.пр.']);
+            const bSurname = b['Фамилия'] || b['ФИО'] || b['Имя'] || '';
+
+            let candidateMatches = [];
+
+            parsedPatients.forEach(p => {
+                if (p._isStandaloneBiochem) return;
+
+                const pDate = extractComparableDate(p['Вр.измер.'] || p['Время взят.пр.'] || p['Дата']);
+                const pSurname = p['Фамилия'] || p['Имя'] || '';
+
+                const dateMatches = (!bDate || !pDate || bDate === pDate);
+
+                if (dateMatches && isSurnameMatch(pSurname, bSurname)) {
+                    candidateMatches.push(p);
+                }
+            });
+
+            if (candidateMatches.length === 1) {
+                // Auto-match with hematology patient
+                const target = candidateMatches[0];
+                if (b['Glu']) target['Glu'] = b['Glu'];
+                if (b['GGT']) target['GGT'] = b['GGT'];
+                target._hasBiochem = true;
+                target._biochemSource = b;
+                evaluatePatientHealthStatus(target);
+            } else {
+                // Create Standalone Biochemistry Patient
+                const sid = b['ID образца.'] || b['SampleID'] || '';
+                const standaloneKey = `BIOCHEM_${sid}_${b['Дата'] || b['Вр.измер.'] || ''}_${b['Фамилия'] || ''}`;
+
+                const existingIdx = parsedPatients.findIndex(p => p.uniqueKey === standaloneKey);
+                const standalonePatient = {
+                    'ID образца.': sid,
+                    'Фамилия': b['Фамилия'] || '',
+                    'Имя': b['Имя'] || '',
+                    'ФИО': b['ФИО'] || `${b['Фамилия'] || ''} ${b['Имя'] || ''}`.trim(),
+                    'Вр.измер.': b['Вр.измер.'] || `${b['Дата'] || ''} ${b['Время'] || ''}`.trim(),
+                    'Дата': b['Дата'] || '',
+                    'Время': b['Время'] || '',
+                    'Glu': b['Glu'] || '',
+                    'GGT': b['GGT'] || '',
+                    _hasBiochem: true,
+                    _isStandaloneBiochem: true,
+                    _biochemSource: b,
+                    uniqueKey: standaloneKey
+                };
+                evaluatePatientHealthStatus(standalonePatient);
+
+                if (existingIdx !== -1) {
+                    parsedPatients[existingIdx] = standalonePatient;
+                } else {
+                    parsedPatients.push(standalonePatient);
+                }
+            }
+        });
+    }
+
+    function unlinkCurrentPatientBiochem() {
+        const patient = filteredPatients[currentPatientIndex];
+        if (!patient || !patient._hasBiochem || patient._isStandaloneBiochem) return;
+
+        if (!confirm(`Від'єднати біохімію (Glu / GGT) від пацієнта ${patient['Фамилия'] || ''} ${patient['Имя'] || ''}?`)) return;
+
+        const bSource = patient._biochemSource || {
+            'ID образца.': patient['ID образца.'],
+            'Фамилия': patient['Фамилия'],
+            'Имя': patient['Имя'],
+            'Дата': extractComparableDate(patient['Вр.измер.'] || patient['Время взят.пр.']),
+            'Glu': patient['Glu'],
+            'GGT': patient['GGT']
+        };
+
+        // Remove biochem from CBC patient
+        delete patient['Glu'];
+        delete patient['GGT'];
+        patient._hasBiochem = false;
+        delete patient._biochemSource;
+        evaluatePatientHealthStatus(patient);
+
+        // Add as standalone biochem patient
+        const sid = bSource['ID образца.'] || '0';
+        const standaloneKey = `BIOCHEM_${sid}_${bSource['Дата'] || ''}_${bSource['Фамилия'] || ''}`;
+        const standalonePatient = {
+            'ID образца.': sid,
+            'Фамилия': bSource['Фамилия'] || '',
+            'Имя': bSource['Имя'] || '',
+            'ФИО': bSource['ФИО'] || `${bSource['Фамилия'] || ''} ${bSource['Имя'] || ''}`.trim(),
+            'Вр.измер.': bSource['Вр.измер.'] || `${bSource['Дата'] || ''} ${bSource['Время'] || ''}`.trim(),
+            'Дата': bSource['Дата'] || '',
+            'Время': bSource['Время'] || '',
+            'Glu': bSource['Glu'] || '',
+            'GGT': bSource['GGT'] || '',
+            _hasBiochem: true,
+            _isStandaloneBiochem: true,
+            _biochemSource: bSource,
+            uniqueKey: standaloneKey
+        };
+        evaluatePatientHealthStatus(standalonePatient);
+        parsedPatients.push(standalonePatient);
+
+        savePatientsToDB(parsedPatients);
+        applyFilters();
+    }
+
+    function deletePatientRecord(patient) {
+        if (!confirm(`Видалити аналіз пацієнта ${patient['Фамилия'] || ''} ${patient['Имя'] || ''}?`)) return;
+        const idx = parsedPatients.indexOf(patient);
+        if (idx !== -1) {
+            parsedPatients.splice(idx, 1);
+            if (db) {
+                try {
+                    const transaction = db.transaction(['patientsStore'], 'readwrite');
+                    transaction.objectStore('patientsStore').delete(patient.uniqueKey);
+                } catch (e) {}
+            }
+            applyFilters();
+        }
+    }
+
+    function openLinkModal(biochemPatient) {
+        activeModalBiochemItem = biochemPatient;
+        if (!activeModalBiochemItem) return;
+
+        const fullName = `${biochemPatient['Фамилия'] || ''} ${biochemPatient['Имя'] || ''}`.trim() || `ID: ${biochemPatient['ID образца.']}`;
+        const dateStr = extractComparableDate(biochemPatient['Вр.измер.'] || biochemPatient['Дата']);
+        const gluStr = biochemPatient['Glu'] ? `Glu: ${biochemPatient['Glu']} ммоль/л` : '';
+        const ggtStr = biochemPatient['GGT'] ? `GGT: ${biochemPatient['GGT']} Од/л` : '';
+        const valStr = [gluStr, ggtStr].filter(Boolean).join(' | ');
+
+        if (modalBiochemDetails) {
+            modalBiochemDetails.textContent = `Біохімія: ${fullName} (${dateStr}) — ${valStr}`;
+        }
+        if (modalPatientSearch) modalPatientSearch.value = '';
+
+        populateModalPatientList();
+        if (linkModal) linkModal.style.display = 'flex';
+    }
+
+    function closeLinkModal() {
+        if (linkModal) linkModal.style.display = 'none';
+        activeModalBiochemItem = null;
+    }
+
+    function populateModalPatientList(query = '') {
+        if (!modalPatientList) return;
+        modalPatientList.innerHTML = '';
+
+        const q = query.toLowerCase().trim();
+        const bDate = activeModalBiochemItem ? extractComparableDate(activeModalBiochemItem['Вр.измер.'] || activeModalBiochemItem['Дата']) : '';
+
+        const candidates = parsedPatients.filter(p => !p._isStandaloneBiochem);
+
+        const matched = candidates.filter(p => {
+            const fullName = `${p['Фамилия'] || ''} ${p['Имя'] || ''}`.toLowerCase();
+            const sid = (p['ID образца.'] || '').toLowerCase();
+            if (q) return fullName.includes(q) || sid.includes(q);
+            return true;
+        });
+
+        if (matched.length === 0) {
+            modalPatientList.innerHTML = '<li style="padding:1rem;color:#94a3b8;text-align:center;">Пацієнтів гематології не знайдено</li>';
+            return;
+        }
+
+        matched.forEach(p => {
+            const li = document.createElement('li');
+            li.className = 'modal-patient-item';
+
+            const fullName = `${p['Фамилия'] || ''} ${p['Имя'] || ''}`.trim() || 'Пацієнт';
+            const sid = p['ID образца.'] || '—';
+            const pDate = extractComparableDate(p['Вр.измер.'] || p['Время взят.пр.']);
+            const hasBio = p._hasBiochem ? ' <span class="badge-mini-bio">Вже має біохімію</span>' : '';
+            const sameDateMark = (bDate && pDate === bDate) ? ' <span class="badge-same-date">📅 Співпадає дата</span>' : '';
+
+            li.innerHTML = `
+                <div class="modal-item-title">${fullName} ${hasBio} ${sameDateMark}</div>
+                <div class="modal-item-meta">ID: ${sid} | Дата: ${pDate}</div>
+            `;
+
+            li.addEventListener('click', () => {
+                executeManualLink(p);
+            });
+
+            modalPatientList.appendChild(li);
+        });
+    }
+
+    function executeManualLink(targetPatient) {
+        if (!activeModalBiochemItem || !targetPatient) return;
+
+        if (activeModalBiochemItem['Glu']) targetPatient['Glu'] = activeModalBiochemItem['Glu'];
+        if (activeModalBiochemItem['GGT']) targetPatient['GGT'] = activeModalBiochemItem['GGT'];
+        targetPatient._hasBiochem = true;
+        targetPatient._biochemSource = activeModalBiochemItem._biochemSource || activeModalBiochemItem;
+
+        const idx = parsedPatients.indexOf(activeModalBiochemItem);
+        if (idx !== -1) parsedPatients.splice(idx, 1);
+
+        evaluatePatientHealthStatus(targetPatient);
+        savePatientsToDB(parsedPatients);
+
+        closeLinkModal();
+        applyFilters();
+    }
+
+    function showContextMenu(x, y, items) {
+        if (!customContextMenu) return;
+        customContextMenu.innerHTML = '';
+        items.forEach(item => {
+            const btn = document.createElement('div');
+            btn.className = 'context-menu-item';
+            btn.textContent = item.label;
+            btn.addEventListener('click', () => {
+                customContextMenu.style.display = 'none';
+                item.action();
+            });
+            customContextMenu.appendChild(btn);
+        });
+        customContextMenu.style.left = `${x}px`;
+        customContextMenu.style.top = `${y}px`;
+        customContextMenu.style.display = 'block';
+    }
+
+    window.unlinkCurrentPatientBiochem = unlinkCurrentPatientBiochem;
+
     // Initialize Event Listeners
     function init() {
         mainFolderInput = document.getElementById('mainFolderInput');
@@ -465,7 +697,7 @@
         // Persist to native IndexedDB (with full Base64 images!)
         savePatientsToDB(parsedPatients);
 
-        const statusText = `Успішно завантажено та збережено ${parsedPatients.length} пацієнтів з графіками`;
+        const statusText = `Успішно завантажено та збережено ${parsedPatients.length} пацієнтів`;
         mainFolderStatus.textContent = statusText;
         compactFolderText.textContent = statusText;
 
