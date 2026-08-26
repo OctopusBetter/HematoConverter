@@ -46,10 +46,10 @@
                     <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path><path d="M12 11v6"></path><path d="M9 14l3-3 3 3"></path></svg>
                 </div>
                 <h2>Оберіть або перетягніть папку з аналізами</h2>
-                <p>Оберіть папку експорту (наприклад, <code>SCAN_00</code>). Програма миттєво знайде всі результати <code>.csv</code> та графіки <code>.png</code>!</p>
+                <p>Оберіть папку гематології (<code>SCAN_00</code>) або папку/файл біохімії з флешки (<code>Mindray_BS230_Export</code>). Програма миттєво зчитає та об'єднає всі результати!</p>
                 
                 <div class="no-popup-tip-capsule">
-                    ✨ <strong>Перетягніть папку мишею сюди</strong> — без додаткових підтверджень браузера!
+                    ✨ <strong>Перетягніть папку або CSV-файли сюди</strong> — без додаткових підтверджень браузера!
                 </div>
 
                 <div class="file-status-pill" id="mainFolderStatus">Папку не обрано</div>
@@ -63,7 +63,7 @@
                 </div>
                 <button id="reselectFolderBtn" class="btn-pill-compact">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
-                    Додати / Змінити папку
+                    Додати ще файли / папку
                 </button>
             </div>
         </section>
@@ -105,6 +105,20 @@
 
                     <input type="text" id="patientSearch" placeholder="Пошук за прізвищем або ID..." class="search-input-pill">
                 </div>
+
+                <!-- Unmatched Biochemistry Pool Section -->
+                <div class="unmatched-biochem-section" id="unmatchedBiochemSection" style="display: none;">
+                    <div class="unmatched-header" id="unmatchedHeader">
+                        <div class="unmatched-title">
+                            <span class="unmatched-badge-dot"></span>
+                            <strong>Неприв'язана біохімія (<span id="unmatchedCount">0</span>)</strong>
+                        </div>
+                        <span class="unmatched-toggle-arrow">▼</span>
+                    </div>
+                    <ul class="unmatched-list" id="unmatchedBiochemList">
+                        <!-- Dynamically populated unmatched items -->
+                    </ul>
+                </div>
                 
                 <ul class="patient-list" id="patientList">
                     <!-- Dynamic Patient Items -->
@@ -117,7 +131,11 @@
                     <div class="patient-info-toolbar">
                         <span class="toolbar-title" id="currentPatientTitle">Оберіть пацієнта для перегляду</span>
                     </div>
-                    <div class="toolbar-actions">
+                    <div class="toolbar-actions" id="toolbarActions">
+                        <button id="unlinkBiochemBtn" class="btn btn-pill-danger-outline" style="display: none;" title="Від'єднати показники біохімії (глюкозу та ГГТ) від цього пацієнта">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                            Від'єднати біохімію
+                        </button>
                         <button id="printCurrentBtn" class="btn btn-pill-secondary">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 6 2 18 2 18 9"></polyline><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path><rect x="6" y="14" width="12" height="8"></rect></svg>
                             Друк поточного бланка
@@ -139,6 +157,30 @@
     <div id="printContainer" class="print-only">
         <!-- Rendered Batch Patient Pages go here -->
     </div>
+
+    <!-- Manual Linking Modal Dialog -->
+    <div id="linkModal" class="modal-overlay" style="display: none;">
+        <div class="modal-card">
+            <div class="modal-header">
+                <div class="modal-title-group">
+                    <h3 id="modalTitle">Об'єднати аналіз біохімії з пацієнтом</h3>
+                    <p id="modalBiochemDetails" class="modal-subtitle"></p>
+                </div>
+                <button id="closeModalBtn" class="modal-close-btn" title="Закрити">&times;</button>
+            </div>
+            <div class="modal-body">
+                <input type="text" id="modalPatientSearch" placeholder="Швидкий пошук пацієнта гематології..." class="search-input-pill modal-search">
+                <div class="modal-list-wrapper">
+                    <ul id="modalPatientList" class="modal-patient-list">
+                        <!-- Candidate Patients -->
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Custom Context Menu for Right Click -->
+    <div id="customContextMenu" class="custom-context-menu" style="display: none;"></div>
 
     <!-- Application Script -->
     <script src="app.js"></script>

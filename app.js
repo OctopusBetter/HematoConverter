@@ -2,6 +2,7 @@
    HEMATOLOGY ANALYZER REPORT CONVERTER - APP LOGIC (app.js)
    Parses CSV, pairs PNG graphs as Base64, evaluates medical norms, renders A4 reports
    100% Ukrainian Language, Capsule UI Design System, Universal Compatibility
+   Supports Biochemistry Integration (Mindray BS-230: Glu, GGT) + Smart Fuzzy Match
    ========================================================================== */
 
 (function () {
@@ -10,20 +11,25 @@
     // App State
     let parsedPatients = [];
     let filteredPatients = [];
+    let unmatchedBiochemList = [];
     let uploadedFilesMap = new Map(); // UPPERCASE_FILENAME -> File Object
     let currentPatientIndex = 0;
     let availableDatesMap = new Map(); // "05.08.2026" -> "2026-08-05"
     let activeDateFilter = 'ALL';
     let activeStatusFilter = 'ALL'; // 'ALL', 'ABNORMAL', 'NORMAL'
     let db = null; // Native IndexedDB instance
+    let activeModalBiochemItem = null;
 
     // DOM Elements
     let mainFolderInput, mainFolderDropZone, mainFolderStatus, uploadSection;
     let compactFolderBar, compactFolderText, reselectFolderBtn;
-    let demoBtn, printAllBtn, printCurrentBtn;
+    let printAllBtn, printCurrentBtn, unlinkBiochemBtn;
     let patientCountBadge, workspace, patientList, patientSearch;
     let totalPatients, currentPatientTitle, singleReportContainer, printContainer;
     let dateFilterSelect, datePickerInput, clearDateBtn, statusFilterSelect, clearDbBtn;
+    let unmatchedBiochemSection, unmatchedBiochemListEl, unmatchedCount, unmatchedHeader;
+    let linkModal, modalTitle, modalBiochemDetails, closeModalBtn, modalPatientSearch, modalPatientList;
+    let customContextMenu;
 
     // Parameter Dictionary: Ukrainian Descriptive Names & Units
     const PARAMETER_INFO = {
@@ -52,20 +58,25 @@
         'PCT': { ukrName: 'Тромбокрит', code: 'PCT', unit: '%', min: 0.10, max: 0.40 },
         'P-LCR': { ukrName: 'Частка великих тромбоцитів', code: 'P-LCR', unit: '%', min: 15.0, max: 35.0 },
         'P-LCC': { ukrName: 'Кількість великих тромбоцитів', code: 'P-LCC', unit: '10⁹/л', min: 30, max: 90 },
-        'CRP': { ukrName: 'С-реактивний білок', code: 'CRP', unit: 'мг/л', min: 0.0, max: 5.0 }
+        'CRP': { ukrName: 'С-реактивний білок', code: 'CRP', unit: 'мг/л', min: 0.0, max: 5.0 },
+        'Glu': { ukrName: 'Глюкоза (сироватка)', code: 'Glu', unit: 'ммоль/л', min: 4.10, max: 5.90 },
+        'GGT': { ukrName: 'Гамма-глутамілтрансфераза (ГГТ)', code: 'GGT', unit: 'Од/л', min: 10.0, max: 50.0 }
     };
 
     /* ==========================================================================
-       NATIVE INDEXEDDB LOCAL STORAGE MANAGER (FULL DATA BASE64 PERSISTENCE)
+       NATIVE INDEXEDDB LOCAL STORAGE MANAGER (FULL DATA PERSISTENCE)
        ========================================================================== */
     function initDB(callback) {
         if (!window.indexedDB) { if (callback) callback(); return; }
-        const request = indexedDB.open('HematologyConverterDB', 1);
+        const request = indexedDB.open('HematologyConverterDB', 2);
 
         request.onupgradeneeded = function (e) {
             const database = e.target.result;
             if (!database.objectStoreNames.contains('patientsStore')) {
                 database.createObjectStore('patientsStore', { keyPath: 'uniqueKey' });
+            }
+            if (!database.objectStoreNames.contains('unmatchedBiochemStore')) {
+                database.createObjectStore('unmatchedBiochemStore', { keyPath: 'uniqueKey' });
             }
         };
 
@@ -86,10 +97,26 @@
         const store = transaction.objectStore('patientsStore');
 
         patientsToSave.forEach(patient => {
-            const uniqueKey = `${patient['ID образца.']}_${patient['Вр.измер.'] || patient['Время взят.пр.']}`;
+            const uniqueKey = patient.uniqueKey || `${patient['ID образца.']}_${patient['Вр.измер.'] || patient['Время взят.пр.']}`;
             patient.uniqueKey = uniqueKey;
             store.put(patient);
         });
+    }
+
+    function saveUnmatchedBiochemToDB(unmatchedItems) {
+        if (!db) return;
+        try {
+            const transaction = db.transaction(['unmatchedBiochemStore'], 'readwrite');
+            const store = transaction.objectStore('unmatchedBiochemStore');
+            store.clear();
+            unmatchedItems.forEach(item => {
+                const uniqueKey = item.uniqueKey || `BIOCHEM_${item['ID образца.']}_${item['Дата'] || item['Вр.измер.']}_${item['Фамилия'] || ''}`;
+                item.uniqueKey = uniqueKey;
+                store.put(item);
+            });
+        } catch (e) {
+            console.warn('Could not save unmatched biochem to DB:', e);
+        }
     }
 
     function loadPatientsFromDB(callback) {
@@ -116,26 +143,56 @@
                 populateDateFilterOptions();
                 updateUI();
             }
+
+            // Load unmatched biochem
+            try {
+                const bTransaction = db.transaction(['unmatchedBiochemStore'], 'readonly');
+                const bStore = bTransaction.objectStore('unmatchedBiochemStore');
+                const bReq = bStore.getAll();
+                bReq.onsuccess = function (evt) {
+                    unmatchedBiochemList = evt.target.result || [];
+                    renderUnmatchedBiochemSection();
+                };
+            } catch (err) {}
+
+            if (callback) callback();
+        };
+
+        request.onerror = function () {
             if (callback) callback();
         };
     }
 
     function clearDatabase() {
-        if (confirm('Ви впевнені, що хочете очистити збережену історію пацієнтів?')) {
-            if (db) {
+        if (!confirm('Ви дійсно бажаєте повністю очистити збережену базу пацієнтів та історію?')) return;
+        if (db) {
+            try {
+                const transaction = db.transaction(['patientsStore', 'unmatchedBiochemStore'], 'readwrite');
+                transaction.objectStore('patientsStore').clear();
+                transaction.objectStore('unmatchedBiochemStore').clear();
+            } catch (e) {
                 const transaction = db.transaction(['patientsStore'], 'readwrite');
-                const store = transaction.objectStore('patientsStore');
-                store.clear();
+                transaction.objectStore('patientsStore').clear();
             }
-            parsedPatients = [];
-            filteredPatients = [];
-            uploadedFilesMap.clear();
-            updateUI();
-            location.reload();
         }
+        parsedPatients = [];
+        filteredPatients = [];
+        unmatchedBiochemList = [];
+        uploadedFilesMap.clear();
+        availableDatesMap.clear();
+
+        if (mainFolderStatus) mainFolderStatus.textContent = 'Базу повністю очищено.';
+        if (compactFolderText) compactFolderText.textContent = 'Базу очищено.';
+        if (uploadSection) uploadSection.classList.remove('compact');
+        if (mainFolderDropZone) mainFolderDropZone.style.display = 'block';
+        if (compactFolderBar) compactFolderBar.style.display = 'none';
+        if (workspace) workspace.style.display = 'none';
+        if (printAllBtn) printAllBtn.disabled = true;
+
+        renderUnmatchedBiochemSection();
     }
 
-    // Convert File to Base64 Data URL Promise
+    // Helper: Convert File to Base64 Data URL
     function fileToBase64(fileObj) {
         return new Promise((resolve) => {
             if (!fileObj) { resolve(null); return; }
@@ -146,18 +203,22 @@
         });
     }
 
-    // Format Date & Time: 05-08-2026 18:12:57 -> { dateStr: "05.08.2026", timeStr: "18:12:57" }
+    // Format Date & Time: 05-08-2026 18:12:57 or 20.08.2026 -> { dateStr: "05.08.2026", timeStr: "18:12:57" }
     function splitUkrainianDateTime(rawTimeStr) {
         if (!rawTimeStr) return { dateStr: '—', timeStr: '—' };
-        const match = rawTimeStr.match(/(\d{2})-(\d{2})-(\d{4})\s+(\d{2}:\d{2}:\d{2})/);
+        const match = String(rawTimeStr).match(/(\d{2})[-.](\d{2})[-.](\d{4})\s+(\d{2}:\d{2}:\d{2})/);
         if (match) {
             return { dateStr: `${match[1]}.${match[2]}.${match[3]}`, timeStr: match[4] };
         }
-        const dateOnlyMatch = rawTimeStr.match(/(\d{2})-(\d{2})-(\d{4})/);
+        const dateOnlyMatch = String(rawTimeStr).match(/(\d{2})[-.](\d{2})[-.](\d{4})/);
         if (dateOnlyMatch) {
             return { dateStr: `${dateOnlyMatch[1]}.${dateOnlyMatch[2]}.${dateOnlyMatch[3]}`, timeStr: '—' };
         }
-        return { dateStr: rawTimeStr, timeStr: '—' };
+        const isoMatch = String(rawTimeStr).match(/(\d{4})-(\d{2})-(\d{2})/);
+        if (isoMatch) {
+            return { dateStr: `${isoMatch[3]}.${isoMatch[2]}.${isoMatch[1]}`, timeStr: '—' };
+        }
+        return { dateStr: String(rawTimeStr), timeStr: '—' };
     }
 
     // Evaluate patient health status & count abnormal parameters
@@ -168,7 +229,7 @@
         paramKeys.forEach(key => {
             const rawVal = patient[key];
             if (rawVal !== undefined && rawVal !== '' && rawVal !== '***.*' && rawVal !== '***') {
-                const numVal = parseFloat(rawVal.replace(',', '.'));
+                const numVal = parseFloat(String(rawVal).replace(',', '.'));
                 const info = PARAMETER_INFO[key];
                 if (info && !isNaN(numVal)) {
                     if (numVal < info.min || numVal > info.max) {
@@ -192,7 +253,57 @@
         });
     }
 
-    // Initialize Event Listeners
+    /* ==========================================================================
+       SMART FUZZY MATCHING ENGINE FOR PATIENT SURNAME & DATE
+       ========================================================================== */
+    function normalizeNameForMatch(name) {
+        if (!name) return '';
+        let s = String(name).toLowerCase().trim();
+        s = s.replace(/[.,\-_'"`/\\#$@!%^&*()+=~?]/g, ' ');
+        s = s.replace(/і/g, 'и').replace(/ї/g, 'и').replace(/є/g, 'е').replace(/ё/g, 'е').replace(/ы/g, 'и');
+        s = s.replace(/\s+/g, ' ').trim();
+        const parts = s.split(' ');
+        return parts[0] || '';
+    }
+
+    function levenshteinDistance(s1, s2) {
+        if (!s1 || !s2) return Math.max(s1 ? s1.length : 0, s2 ? s2.length : 0);
+        const m = s1.length, n = s2.length;
+        const dp = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+        for (let i = 0; i <= m; i++) dp[i][0] = i;
+        for (let j = 0; j <= n; j++) dp[0][j] = j;
+        for (let i = 1; i <= m; i++) {
+            for (let j = 1; j <= n; j++) {
+                const cost = s1[i - 1] === s2[j - 1] ? 0 : 1;
+                dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+            }
+        }
+        return dp[m][n];
+    }
+
+    function isSurnameMatch(name1, name2) {
+        const norm1 = normalizeNameForMatch(name1);
+        const norm2 = normalizeNameForMatch(name2);
+        if (!norm1 || !norm2) return false;
+        if (norm1 === norm2) return true;
+        if (norm1.startsWith(norm2) || norm2.startsWith(norm1)) {
+            if (Math.min(norm1.length, norm2.length) >= 4) return true;
+        }
+        const dist = levenshteinDistance(norm1, norm2);
+        const maxLen = Math.max(norm1.length, norm2.length);
+        if (maxLen >= 5 && dist <= 1) return true;
+        if (maxLen >= 7 && dist <= 2) return true;
+        return false;
+    }
+
+    function extractComparableDate(rawStr) {
+        const { dateStr } = splitUkrainianDateTime(rawStr);
+        return dateStr !== '—' ? dateStr : '';
+    }
+
+    /* ==========================================================================
+       INITIALIZE EVENT LISTENERS & DOM ELEMENTS
+       ========================================================================== */
     function init() {
         mainFolderInput = document.getElementById('mainFolderInput');
         mainFolderDropZone = document.getElementById('mainFolderDropZone');
@@ -202,9 +313,9 @@
         compactFolderText = document.getElementById('compactFolderText');
         reselectFolderBtn = document.getElementById('reselectFolderBtn');
 
-        demoBtn = document.getElementById('demoBtn');
         printAllBtn = document.getElementById('printAllBtn');
         printCurrentBtn = document.getElementById('printCurrentBtn');
+        unlinkBiochemBtn = document.getElementById('unlinkBiochemBtn');
         patientCountBadge = document.getElementById('patientCountBadge');
         workspace = document.getElementById('workspace');
         patientList = document.getElementById('patientList');
@@ -219,11 +330,21 @@
         statusFilterSelect = document.getElementById('statusFilterSelect');
         clearDbBtn = document.getElementById('clearDbBtn');
 
-        if (mainFolderInput) mainFolderInput.addEventListener('change', handleFolderSelect);
+        unmatchedBiochemSection = document.getElementById('unmatchedBiochemSection');
+        unmatchedBiochemListEl = document.getElementById('unmatchedBiochemList');
+        unmatchedCount = document.getElementById('unmatchedCount');
+        unmatchedHeader = document.getElementById('unmatchedHeader');
 
-        if (mainFolderDropZone) {
-            setupSilentDragAndDrop(mainFolderDropZone);
-        }
+        linkModal = document.getElementById('linkModal');
+        modalTitle = document.getElementById('modalTitle');
+        modalBiochemDetails = document.getElementById('modalBiochemDetails');
+        closeModalBtn = document.getElementById('closeModalBtn');
+        modalPatientSearch = document.getElementById('modalPatientSearch');
+        modalPatientList = document.getElementById('modalPatientList');
+        customContextMenu = document.getElementById('customContextMenu');
+
+        if (mainFolderInput) mainFolderInput.addEventListener('change', handleFolderSelect);
+        if (mainFolderDropZone) setupSilentDragAndDrop(mainFolderDropZone);
 
         if (reselectFolderBtn) {
             reselectFolderBtn.addEventListener('click', () => {
@@ -242,6 +363,30 @@
 
         if (printAllBtn) printAllBtn.addEventListener('click', printAllReports);
         if (printCurrentBtn) printCurrentBtn.addEventListener('click', printCurrentReport);
+        if (unlinkBiochemBtn) unlinkBiochemBtn.addEventListener('click', unlinkCurrentPatientBiochem);
+
+        if (unmatchedHeader) {
+            unmatchedHeader.addEventListener('click', () => {
+                unmatchedBiochemSection.classList.toggle('collapsed');
+            });
+        }
+
+        if (closeModalBtn) {
+            closeModalBtn.addEventListener('click', closeLinkModal);
+        }
+        if (linkModal) {
+            linkModal.addEventListener('click', (e) => {
+                if (e.target === linkModal) closeLinkModal();
+            });
+        }
+        if (modalPatientSearch) {
+            modalPatientSearch.addEventListener('input', filterModalPatientList);
+        }
+
+        // Hide context menu on outside click
+        document.addEventListener('click', () => {
+            if (customContextMenu) customContextMenu.style.display = 'none';
+        });
 
         // Initialize Native IndexedDB Storage
         initDB();
@@ -251,6 +396,7 @@
     function setupSilentDragAndDrop(zone) {
         ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
             zone.addEventListener(eventName, preventDefaults, false);
+            document.body.addEventListener(eventName, preventDefaults, false);
         });
 
         ['dragenter', 'dragover'].forEach(eventName => {
@@ -262,48 +408,40 @@
         });
 
         zone.addEventListener('drop', async (e) => {
-            const items = e.dataTransfer.items;
-            if (!items) return;
-
+            const dt = e.dataTransfer;
+            const items = dt.items;
             const files = [];
+
+            if (items && items.length > 0 && items[0].webkitGetAsEntry) {
+                for (let i = 0; i < items.length; i++) {
+                    const entry = items[i].webkitGetAsEntry();
+                    if (entry) await traverseEntry(entry);
+                }
+            } else if (dt.files && dt.files.length > 0) {
+                for (let i = 0; i < dt.files.length; i++) {
+                    files.push(dt.files[i]);
+                }
+            }
 
             async function traverseEntry(entry) {
                 if (entry.isFile) {
-                    return new Promise((resolve) => {
-                        entry.file(f => { files.push(f); resolve(); });
-                    });
+                    const file = await new Promise((resolve) => entry.file(resolve));
+                    files.push(file);
                 } else if (entry.isDirectory) {
                     const dirReader = entry.createReader();
-                    return new Promise((resolve) => {
-                        const readEntries = () => {
-                            dirReader.readEntries(async (entries) => {
-                                if (entries.length === 0) {
-                                    resolve();
-                                } else {
-                                    for (const subEntry of entries) {
-                                        await traverseEntry(subEntry);
-                                    }
-                                    readEntries();
-                                }
-                            });
-                        };
-                        readEntries();
-                    });
+                    const readEntries = async () => {
+                        const entries = await new Promise((resolve) => dirReader.readEntries(resolve));
+                        if (entries.length > 0) {
+                            for (const child of entries) {
+                                await traverseEntry(child);
+                            }
+                            await readEntries();
+                        }
+                    };
+                    await readEntries();
                 }
             }
 
-            const promises = [];
-            for (let i = 0; i < items.length; i++) {
-                const entry = items[i].webkitGetAsEntry ? items[i].webkitGetAsEntry() : null;
-                if (entry) {
-                    promises.push(traverseEntry(entry));
-                } else if (items[i].getAsFile) {
-                    const file = items[i].getAsFile();
-                    if (file) files.push(file);
-                }
-            }
-
-            await Promise.all(promises);
             if (files.length > 0) {
                 processFolderFiles(files);
             }
@@ -315,13 +453,14 @@
         e.stopPropagation();
     }
 
-    // Folder Handler
     function handleFolderSelect(e) {
         const files = e.target.files;
         if (files && files.length > 0) processFolderFiles(files);
     }
 
-    // Process all files in selected directory and convert PNGs to Base64 for 100% persistence
+    /* ==========================================================================
+       PROCESS IMPORTED FILES (HEMATOLOGY + BIOCHEMISTRY)
+       ========================================================================== */
     async function processFolderFiles(files) {
         const fileArray = Array.from(files);
         const csvFiles = fileArray.filter(f => f.name.toLowerCase().endsWith('.csv'));
@@ -331,15 +470,15 @@
             uploadedFilesMap.set(file.name.toUpperCase(), file);
         });
 
-        if (csvFiles.length === 0) {
-            mainFolderStatus.textContent = `Папка містить ${pngFiles.length} графіків, але CSV-файли результатів не знайдено.`;
+        if (csvFiles.length === 0 && pngFiles.length === 0) {
+            mainFolderStatus.textContent = `У вибраній папці не знайдено файлів .csv або .png`;
             return;
         }
 
-        mainFolderStatus.textContent = `Обробка та збереження ${csvFiles.length} файлів результатів та графіків...`;
+        mainFolderStatus.textContent = `Обробка та зчитування файлів...`;
 
-        let newParsedPatients = [];
-        let readCount = 0;
+        let newHematologyPatients = [];
+        let newBiochemRecords = [];
 
         for (const csvFile of csvFiles) {
             const text = await new Promise((resolve) => {
@@ -348,26 +487,32 @@
                 reader.readAsText(csvFile, 'UTF-8');
             });
 
-            const patientsFromCSV = parseCSVText(text);
-            newParsedPatients = newParsedPatients.concat(patientsFromCSV);
+            const parsedRows = parseCSVText(text);
+            parsedRows.forEach(row => {
+                if (row._isBiochem) {
+                    newBiochemRecords.push(row);
+                } else {
+                    newHematologyPatients.push(row);
+                }
+            });
         }
 
-        // Attach PNG Base64 Data URLs to each patient
-        for (const patient of newParsedPatients) {
+        // Attach PNG Base64 Data URLs to each hematology patient
+        for (const patient of newHematologyPatients) {
             await attachImagesToPatient(patient);
         }
 
-        // Combine with existing parsed patients, avoiding duplicates
-        const existingKeys = new Set(parsedPatients.map(p => `${p['ID образца.']}_${p['Вр.измер.'] || p['Время взят.пр.']}`));
+        // Combine Hematology Patients with existing parsed patients, avoiding duplicates
+        const existingKeys = new Set(parsedPatients.map(p => p.uniqueKey || `${p['ID образца.']}_${p['Вр.измер.'] || p['Время взят.пр.']}`));
         
-        newParsedPatients.forEach(p => {
+        newHematologyPatients.forEach(p => {
             const key = `${p['ID образца.']}_${p['Вр.измер.'] || p['Время взят.пр.']}`;
+            p.uniqueKey = key;
             if (!existingKeys.has(key)) {
                 parsedPatients.push(p);
                 existingKeys.add(key);
             } else {
-                // Update existing record with new Base64 images if available
-                const existing = parsedPatients.find(x => x.uniqueKey === key || `${x['ID образца.']}_${x['Вр.измер.'] || x['Время взят.пр.']}` === key);
+                const existing = parsedPatients.find(x => x.uniqueKey === key);
                 if (existing) {
                     if (p.wbcImgData) existing.wbcImgData = p.wbcImgData;
                     if (p.rbcImgData) existing.rbcImgData = p.rbcImgData;
@@ -377,14 +522,30 @@
             }
         });
 
+        // Also check if any existing patient needs updated PNG images
+        for (const patient of parsedPatients) {
+            if (!patient.wbcImgData || !patient.rbcImgData) {
+                await attachImagesToPatient(patient);
+            }
+        }
+
+        // Merge Biochemistry Records with Hematology Patients (Smart Auto-Match)
+        if (newBiochemRecords.length > 0 || unmatchedBiochemList.length > 0) {
+            const allBiochemToMatch = newBiochemRecords.concat(unmatchedBiochemList);
+            unmatchedBiochemList = [];
+            mergeBiochemistryRecords(allBiochemToMatch);
+        }
+
         // Evaluate Health Status & Sort Abnormal Patients to TOP
         parsedPatients.forEach(p => evaluatePatientHealthStatus(p));
         parsedPatients = sortPatientsByHealthStatus(parsedPatients);
 
-        // Persist to native IndexedDB (with full Base64 images!)
+        // Persist to native IndexedDB
         savePatientsToDB(parsedPatients);
+        saveUnmatchedBiochemToDB(unmatchedBiochemList);
 
-        const statusText = `Успішно завантажено та збережено ${parsedPatients.length} пацієнтів з графіками`;
+        const statusText = `Завантажено пацієнтів: ${parsedPatients.length}` + 
+                           (unmatchedBiochemList.length > 0 ? ` (неприв'язаної біохімії: ${unmatchedBiochemList.length})` : '');
         mainFolderStatus.textContent = statusText;
         compactFolderText.textContent = statusText;
 
@@ -395,6 +556,7 @@
 
         populateDateFilterOptions();
         updateUI();
+        renderUnmatchedBiochemSection();
     }
 
     // Attach Base64 PNG data directly to patient object
@@ -404,7 +566,7 @@
 
         let timeStampStr = '';
         if (rawTestTime) {
-            const parts = rawTestTime.match(/(\d{2})-(\d{2})-(\d{4})\s+(\d{2}):(\d{2}):(\d{2})/);
+            const parts = String(rawTestTime).match(/(\d{2})[-.](\d{2})[-.](\d{4})\s+(\d{2}):(\d{2}):(\d{2})/);
             if (parts) {
                 timeStampStr = `${parts[3]}${parts[2]}${parts[1]}${parts[4]}${parts[5]}${parts[6]}`;
             }
@@ -429,57 +591,307 @@
         if (diffFile) patient.diffImgData = await fileToBase64(diffFile);
     }
 
-    // Extract Date from Patient Test Time String
+    /* ==========================================================================
+       BIOCHEMISTRY MERGING & LINKING LOGIC
+       ========================================================================== */
+    function mergeBiochemistryRecords(biochemRecords) {
+        const seenBiochem = new Set();
+
+        biochemRecords.forEach(b => {
+            const bKey = `${b['ID образца.']}_${b['Дата'] || b['Вр.измер.']}_${b['Фамилия'] || ''}_${b['Glu'] || ''}_${b['GGT'] || ''}`;
+            if (seenBiochem.has(bKey)) return;
+            seenBiochem.add(bKey);
+
+            const bDate = extractComparableDate(b['Дата'] || b['Вр.измер.'] || b['Время взят.пр.']);
+            const bSurname = b['Фамилия'] || b['ФИО'] || b['Имя'] || '';
+
+            // Find matching candidate patients on the SAME date
+            let candidateMatches = [];
+
+            parsedPatients.forEach(p => {
+                const pDate = extractComparableDate(p['Вр.измер.'] || p['Время взят.пр.'] || p['Дата']);
+                const pSurname = p['Фамилия'] || p['Имя'] || '';
+
+                // Date matching (or if either has no date, fall back to surname only)
+                const dateMatches = (!bDate || !pDate || bDate === pDate);
+
+                if (dateMatches && isSurnameMatch(pSurname, bSurname)) {
+                    candidateMatches.push(p);
+                }
+            });
+
+            // If exactly 1 candidate matches -> confident auto-link!
+            if (candidateMatches.length === 1) {
+                const target = candidateMatches[0];
+                if (b['Glu']) target['Glu'] = b['Glu'];
+                if (b['GGT']) target['GGT'] = b['GGT'];
+                target._hasBiochem = true;
+                target._biochemSource = b;
+                evaluatePatientHealthStatus(target);
+            } else {
+                // If 0 matches or multiple ambiguous matches -> place in unmatched pool
+                unmatchedBiochemList.push(b);
+            }
+        });
+    }
+
+    function renderUnmatchedBiochemSection() {
+        if (!unmatchedBiochemSection || !unmatchedBiochemListEl || !unmatchedCount) return;
+
+        if (unmatchedBiochemList.length === 0) {
+            unmatchedBiochemSection.style.display = 'none';
+            return;
+        }
+
+        unmatchedBiochemSection.style.display = 'block';
+        unmatchedCount.textContent = unmatchedBiochemList.length;
+        unmatchedBiochemListEl.innerHTML = '';
+
+        unmatchedBiochemList.forEach((item, index) => {
+            const li = document.createElement('li');
+            li.className = 'unmatched-item';
+
+            const nameStr = item['ФИО'] || `${item['Фамилия'] || ''} ${item['Имя'] || ''}`.trim() || `Зразок #${item['ID образца.'] || '?'}`;
+            const dateStr = item['Дата'] || extractComparableDate(item['Вр.измер.'] || item['Время']) || '—';
+            const gluStr = item['Glu'] ? `Glu: ${item['Glu']}` : '';
+            const ggtStr = item['GGT'] ? `GGT: ${item['GGT']}` : '';
+            const valuesStr = [gluStr, ggtStr].filter(Boolean).join(', ');
+
+            li.innerHTML = `
+                <div class="unmatched-item-info">
+                    <div class="unmatched-item-name">${nameStr}</div>
+                    <div class="unmatched-item-sub">📅 ${dateStr} | 🧪 ${valuesStr}</div>
+                </div>
+                <button class="btn-link-pill" title="Об'єднати з пацієнтом гематології">🔗 Прив'язати</button>
+            `;
+
+            const btn = li.querySelector('.btn-link-pill');
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                openLinkModal(index);
+            });
+
+            li.addEventListener('contextmenu', (e) => {
+                e.preventDefault();
+                showContextMenu(e.clientX, e.clientY, [
+                    { label: `🔗 Прив'язати до пацієнта...`, action: () => openLinkModal(index) },
+                    { label: `🗑️ Видалити цей запис біохімії`, action: () => removeUnmatchedBiochem(index) }
+                ]);
+            });
+
+            unmatchedBiochemListEl.appendChild(li);
+        });
+    }
+
+    function removeUnmatchedBiochem(index) {
+        unmatchedBiochemList.splice(index, 1);
+        saveUnmatchedBiochemToDB(unmatchedBiochemList);
+        renderUnmatchedBiochemSection();
+    }
+
+    function openLinkModal(biochemIndex) {
+        activeModalBiochemItem = unmatchedBiochemList[biochemIndex];
+        if (!activeModalBiochemItem) return;
+
+        const nameStr = activeModalBiochemItem['ФИО'] || `${activeModalBiochemItem['Фамилия'] || ''} ${activeModalBiochemItem['Имя'] || ''}`.trim() || `Зразок #${activeModalBiochemItem['ID образца.'] || '?'}`;
+        const dateStr = activeModalBiochemItem['Дата'] || extractComparableDate(activeModalBiochemItem['Вр.измер.']) || '—';
+        const gluStr = activeModalBiochemItem['Glu'] ? `Glu: ${activeModalBiochemItem['Glu']} ммоль/л` : '';
+        const ggtStr = activeModalBiochemItem['GGT'] ? `GGT: ${activeModalBiochemItem['GGT']} Од/л` : '';
+        const valuesStr = [gluStr, ggtStr].filter(Boolean).join(' | ');
+
+        modalBiochemDetails.textContent = `Аналіз біохімії: ${nameStr} (${dateStr}) — ${valuesStr}`;
+        if (modalPatientSearch) modalPatientSearch.value = '';
+
+        populateModalPatientList();
+        if (linkModal) linkModal.style.display = 'flex';
+    }
+
+    function closeLinkModal() {
+        if (linkModal) linkModal.style.display = 'none';
+        activeModalBiochemItem = null;
+    }
+
+    function populateModalPatientList(query = '') {
+        if (!modalPatientList) return;
+        modalPatientList.innerHTML = '';
+
+        const q = query.toLowerCase().trim();
+        const bDate = activeModalBiochemItem ? extractComparableDate(activeModalBiochemItem['Дата'] || activeModalBiochemItem['Вр.измер.']) : '';
+
+        const matched = parsedPatients.filter(p => {
+            const fullName = `${p['Фамилия'] || ''} ${p['Имя'] || ''}`.toLowerCase();
+            const sid = (p['ID образца.'] || '').toLowerCase();
+
+            if (q) {
+                return fullName.includes(q) || sid.includes(q);
+            }
+            return true;
+        });
+
+        matched.forEach(p => {
+            const li = document.createElement('li');
+            li.className = 'modal-patient-item';
+
+            const fullName = `${p['Фамилия'] || ''} ${p['Имя'] || ''}`.trim() || 'Пацієнт';
+            const sid = p['ID образца.'] || '—';
+            const pDate = extractComparableDate(p['Вр.измер.'] || p['Время взят.пр.']);
+            const hasBio = p._hasBiochem ? ' <span class="badge-mini-bio">Вже має біохімію</span>' : '';
+            const sameDateMark = (bDate && pDate === bDate) ? ' <span class="badge-same-date">📅 Співпадає дата</span>' : '';
+
+            li.innerHTML = `
+                <div class="modal-item-title">${fullName} ${hasBio} ${sameDateMark}</div>
+                <div class="modal-item-meta">ID: ${sid} | Дата: ${pDate}</div>
+            `;
+
+            li.addEventListener('click', () => {
+                executeManualLink(p);
+            });
+
+            modalPatientList.appendChild(li);
+        });
+    }
+
+    function filterModalPatientList(e) {
+        populateModalPatientList(e.target.value);
+    }
+
+    function executeManualLink(targetPatient) {
+        if (!activeModalBiochemItem || !targetPatient) return;
+
+        if (activeModalBiochemItem['Glu']) targetPatient['Glu'] = activeModalBiochemItem['Glu'];
+        if (activeModalBiochemItem['GGT']) targetPatient['GGT'] = activeModalBiochemItem['GGT'];
+        targetPatient._hasBiochem = true;
+        targetPatient._biochemSource = activeModalBiochemItem;
+
+        // Remove from unmatched list
+        const idx = unmatchedBiochemList.indexOf(activeModalBiochemItem);
+        if (idx !== -1) unmatchedBiochemList.splice(idx, 1);
+
+        evaluatePatientHealthStatus(targetPatient);
+        savePatientsToDB(parsedPatients);
+        saveUnmatchedBiochemToDB(unmatchedBiochemList);
+
+        closeLinkModal();
+        renderPatientList();
+        renderCurrentPatient();
+        renderUnmatchedBiochemSection();
+    }
+
+    function unlinkCurrentPatientBiochem() {
+        const patient = filteredPatients[currentPatientIndex];
+        if (!patient || !patient._hasBiochem) return;
+
+        if (!confirm(`Від'єднати біохімію (Glu / GGT) від пацієнта ${patient['Фамилия'] || ''} ${patient['Имя'] || ''}?`)) return;
+
+        const bSource = patient._biochemSource || {
+            'ID образца.': patient['ID образца.'],
+            'Фамилия': patient['Фамилия'],
+            'Имя': patient['Имя'],
+            'Дата': extractComparableDate(patient['Вр.измер.'] || patient['Время взят.пр.']),
+            'Glu': patient['Glu'],
+            'GGT': patient['GGT']
+        };
+
+        unmatchedBiochemList.push(bSource);
+        delete patient['Glu'];
+        delete patient['GGT'];
+        patient._hasBiochem = false;
+        delete patient._biochemSource;
+
+        evaluatePatientHealthStatus(patient);
+        savePatientsToDB(parsedPatients);
+        saveUnmatchedBiochemToDB(unmatchedBiochemList);
+
+        renderPatientList();
+        renderCurrentPatient();
+        renderUnmatchedBiochemSection();
+    }
+
+    // Context Menu Handler
+    function showContextMenu(x, y, items) {
+        if (!customContextMenu) return;
+        customContextMenu.innerHTML = '';
+        items.forEach(item => {
+            const btn = document.createElement('div');
+            btn.className = 'context-menu-item';
+            btn.textContent = item.label;
+            btn.addEventListener('click', () => {
+                customContextMenu.style.display = 'none';
+                item.action();
+            });
+            customContextMenu.appendChild(btn);
+        });
+        customContextMenu.style.left = `${x}px`;
+        customContextMenu.style.top = `${y}px`;
+        customContextMenu.style.display = 'block';
+    }
+
+    /* ==========================================================================
+       DATE FILTER LOGIC
+       ========================================================================== */
     function extractPatientDate(testTimeStr) {
         if (!testTimeStr) return null;
-        const fullMatch = testTimeStr.match(/(\d{2})-(\d{2})-(\d{4})/);
-        if (fullMatch) {
-            return {
-                formatted: `${fullMatch[1]}.${fullMatch[2]}.${fullMatch[3]}`,
-                iso: `${fullMatch[3]}-${fullMatch[2]}-${fullMatch[1]}`
-            };
+        const match = String(testTimeStr).match(/(\d{2})[-.](\d{2})[-.](\d{4})/);
+        if (match) {
+            const day = match[1], month = match[2], year = match[3];
+            return { displayDate: `${day}.${month}.${year}`, isoDate: `${year}-${month}-${day}` };
+        }
+        const isoMatch = String(testTimeStr).match(/(\d{4})-(\d{2})-(\d{2})/);
+        if (isoMatch) {
+            return { displayDate: `${isoMatch[3]}.${isoMatch[2]}.${isoMatch[1]}`, isoDate: isoMatch[0] };
         }
         return null;
     }
 
-    // Populate Date Selector with unique dates found in dataset
     function populateDateFilterOptions() {
         availableDatesMap.clear();
-        dateFilterSelect.innerHTML = '<option value="ALL">Всі наявні дати</option>';
-
-        parsedPatients.forEach(p => {
-            const dateObj = extractPatientDate(p['Вр.измер.'] || p['Время взят.пр.']);
-            if (dateObj) {
-                availableDatesMap.set(dateObj.formatted, dateObj.iso);
-            }
+        parsedPatients.forEach(patient => {
+            const rawTime = patient['Вр.измер.'] || patient['Время взят.пр.'] || patient['Дата'];
+            const dateObj = extractPatientDate(rawTime);
+            if (dateObj) availableDatesMap.set(dateObj.displayDate, dateObj.isoDate);
         });
 
-        for (const [formatted, iso] of availableDatesMap.entries()) {
-            const opt = document.createElement('option');
-            opt.value = iso;
-            opt.textContent = `Дата: ${formatted}`;
-            dateFilterSelect.appendChild(opt);
-        }
+        if (!dateFilterSelect) return;
+        dateFilterSelect.innerHTML = '<option value="ALL">Всі наявні дати</option>';
+
+        const sortedDates = Array.from(availableDatesMap.keys()).sort((a, b) => {
+            const [d1, m1, y1] = a.split('.').map(Number);
+            const [d2, m2, y2] = b.split('.').map(Number);
+            return new Date(y2, m2 - 1, d2) - new Date(y1, m1 - 1, d1);
+        });
+
+        sortedDates.forEach(dateStr => {
+            const option = document.createElement('option');
+            option.value = dateStr;
+            option.textContent = `📅 ${dateStr}`;
+            dateFilterSelect.appendChild(option);
+        });
     }
 
-    // Filter Change Handlers
     function handleDateSelectChange(e) {
         activeDateFilter = e.target.value;
-        datePickerInput.value = activeDateFilter !== 'ALL' ? activeDateFilter : '';
+        if (activeDateFilter !== 'ALL' && availableDatesMap.has(activeDateFilter)) {
+            datePickerInput.value = availableDatesMap.get(activeDateFilter);
+        } else {
+            datePickerInput.value = '';
+        }
         applyFilters();
     }
 
     function handleDatePickerChange(e) {
-        const val = e.target.value;
-        activeDateFilter = val || 'ALL';
-        dateFilterSelect.value = val || 'ALL';
+        const pickedIso = e.target.value;
+        if (!pickedIso) { resetDateFilter(); return; }
+        const [year, month, day] = pickedIso.split('-');
+        const targetDisplayDate = `${day}.${month}.${year}`;
+        activeDateFilter = targetDisplayDate;
+        dateFilterSelect.value = availableDatesMap.has(targetDisplayDate) ? targetDisplayDate : 'ALL';
         applyFilters();
     }
 
     function resetDateFilter() {
         activeDateFilter = 'ALL';
-        dateFilterSelect.value = 'ALL';
-        datePickerInput.value = '';
+        if (dateFilterSelect) dateFilterSelect.value = 'ALL';
+        if (datePickerInput) datePickerInput.value = '';
         applyFilters();
     }
 
@@ -488,37 +900,33 @@
         applyFilters();
     }
 
-    // Apply Filters (Search, Date, Status Norm)
+    /* ==========================================================================
+       FILTERING & SEARCH
+       ========================================================================== */
     function applyFilters() {
-        const search = patientSearch.value.toLowerCase().trim();
+        const query = patientSearch ? patientSearch.value.toLowerCase().trim() : '';
 
         filteredPatients = parsedPatients.filter(patient => {
-            const fullName = `${patient['Фамилия'] || ''} ${patient['Имя'] || ''}`.trim().toLowerCase();
-            const sampleID = (patient['ID образца.'] || '').toLowerCase();
-            const matchesSearch = !search || fullName.includes(search) || sampleID.includes(search);
+            // Health Status Filter
+            if (activeStatusFilter === 'ABNORMAL' && !patient.hasAbnormalities) return false;
+            if (activeStatusFilter === 'NORMAL' && patient.hasAbnormalities) return false;
 
             // Date Filter
-            let matchesDate = true;
             if (activeDateFilter !== 'ALL') {
-                const dateObj = extractPatientDate(patient['Вр.измер.'] || patient['Время взят.пр.']);
-                if (!dateObj || dateObj.iso !== activeDateFilter) {
-                    matchesDate = false;
-                }
+                const rawTime = patient['Вр.измер.'] || patient['Время взят.пр.'] || patient['Дата'];
+                const dateObj = extractPatientDate(rawTime);
+                if (!dateObj || dateObj.displayDate !== activeDateFilter) return false;
             }
 
-            // Status Filter (Abnormal vs Normal)
-            let matchesStatus = true;
-            if (activeStatusFilter === 'ABNORMAL') {
-                matchesStatus = patient.hasAbnormalities === true;
-            } else if (activeStatusFilter === 'NORMAL') {
-                matchesStatus = patient.hasAbnormalities === false;
+            // Search Query Filter
+            if (query) {
+                const fullName = `${patient['Фамилия'] || ''} ${patient['Имя'] || ''}`.toLowerCase();
+                const sampleID = (patient['ID образца.'] || '').toLowerCase();
+                return fullName.includes(query) || sampleID.includes(query);
             }
 
-            return matchesSearch && matchesDate && matchesStatus;
+            return true;
         });
-
-        // Always keep abnormal patients grouped at top of filtered results
-        filteredPatients = sortPatientsByHealthStatus(filteredPatients);
 
         currentPatientIndex = 0;
         patientCountBadge.textContent = filteredPatients.length;
@@ -527,17 +935,25 @@
         renderCurrentPatient();
     }
 
-    // CSV Parser Supporting Quoted CSV strings (STRICTLY FILTERS OUT BACKGROUND CALIBRATION ROWS)
+    /* ==========================================================================
+       CSV PARSER (HANDLES BOTH HEMATOLOGY & MINDRAY BIOCHEMISTRY)
+       ========================================================================== */
     function parseCSVText(csvText) {
         const lines = csvText.split(/\r?\n/).filter(line => line.trim() !== '');
         if (lines.length < 2) return [];
 
         const headers = parseCSVLine(lines[0]);
-        const patients = [];
+        const results = [];
+
+        // Detect if this CSV is from Mindray Biochemistry
+        const headerStr = headers.join(' ').toLowerCase();
+        const isBiochemFile = (headerStr.includes('glu') && headerStr.includes('ggt')) || 
+                              headerStr.includes('тип_анализа') || 
+                              (!headerStr.includes('wbc') && !headerStr.includes('rbc'));
 
         for (let i = 1; i < lines.length; i++) {
             const values = parseCSVLine(lines[i]);
-            if (values.length < 5) continue;
+            if (values.length < 3) continue;
 
             const rowObj = {};
             headers.forEach((h, index) => {
@@ -545,7 +961,7 @@
             });
 
             // STRICT BACKGROUND CHECK FILTERING
-            const sampleID = (rowObj['ID образца.'] || '').toLowerCase();
+            const sampleID = (rowObj['ID образца.'] || rowObj['SampleID'] || '').toLowerCase();
             const probeType = (rowObj['Тип пробы'] || '').toLowerCase();
             const patientType = (rowObj['Тип пациента'] || '').toLowerCase();
 
@@ -553,16 +969,24 @@
                 continue;
             }
 
-            if (!rowObj['Имя'] && !rowObj['Фамилия'] && (!sampleID || sampleID === '' || sampleID === '0')) {
-                if (rowObj['WBC'] === '0,00' || rowObj['WBC'] === '0') continue;
+            if (isBiochemFile) {
+                rowObj._isBiochem = true;
+                if (!rowObj['ID образца.'] && rowObj['SampleID']) rowObj['ID образца.'] = rowObj['SampleID'];
+                if (!rowObj['Фамилия'] && rowObj['LastName']) rowObj['Фамилия'] = rowObj['LastName'];
+                if (!rowObj['Имя'] && rowObj['FirstName']) rowObj['Имя'] = rowObj['FirstName'];
+                if (!rowObj['Дата'] && rowObj['Date']) rowObj['Дата'] = rowObj['Date'];
+                if (!rowObj['Время'] && rowObj['Time']) rowObj['Время'] = rowObj['Time'];
+            } else {
+                if (!rowObj['Имя'] && !rowObj['Фамилия'] && (!sampleID || sampleID === '' || sampleID === '0')) {
+                    if (rowObj['WBC'] === '0,00' || rowObj['WBC'] === '0') continue;
+                }
             }
 
-            patients.push(rowObj);
+            results.push(rowObj);
         }
-        return patients;
+        return results;
     }
 
-    // Parse single CSV line handling quotes and commas
     function parseCSVLine(text) {
         const result = [];
         let cur = '';
@@ -583,156 +1007,163 @@
         return result;
     }
 
-    // Update Main UI State
+    /* ==========================================================================
+       UI RENDERING (PATIENT LIST & PREVIEW)
+       ========================================================================== */
     function updateUI() {
-        if (parsedPatients.length > 0) {
-            workspace.style.display = 'flex';
-            printAllBtn.disabled = false;
-            applyFilters();
-        }
+        workspace.style.display = 'flex';
+        printAllBtn.disabled = parsedPatients.length === 0;
+        applyFilters();
     }
 
-    // Render Left Patient List with Abnormal Warning Badges
     function renderPatientList() {
         patientList.innerHTML = '';
 
         if (filteredPatients.length === 0) {
-            patientList.innerHTML = '<li class="patient-item" style="color:#94a3b8;text-align:center;padding:1.5rem 1rem;">Пацієнтів за обраними критеріями не знайдено</li>';
+            patientList.innerHTML = '<li class="no-patients-item">Пацієнтів не знайдено</li>';
             return;
         }
 
-        filteredPatients.forEach((patient, idx) => {
-            const fullName = `${patient['Фамилия'] || ''} ${patient['Имя'] || ''}`.trim() || 'Без імені';
-            const sampleID = patient['ID образца.'] || `№${idx + 1}`;
-            const { dateStr, timeStr } = splitUkrainianDateTime(patient['Вр.измер.'] || '');
-
-            let badgeHTML = '<span class="status-indicator-badge normal">✅ В нормі</span>';
-            let abnormalClass = '';
-
-            if (patient.hasAbnormalities) {
-                badgeHTML = `<span class="status-indicator-badge abnormal">⚠️ ${patient.abnormalCount} відхил.</span>`;
-                abnormalClass = 'item-abnormal';
-            }
-
+        filteredPatients.forEach((patient, index) => {
             const li = document.createElement('li');
-            li.className = `patient-item ${abnormalClass} ${idx === currentPatientIndex ? 'active' : ''}`;
+            li.className = `patient-item ${index === currentPatientIndex ? 'active' : ''} ${patient.hasAbnormalities ? 'item-abnormal' : 'item-normal'}`;
+
+            const fullName = `${patient['Фамилия'] || ''} ${patient['Имя'] || ''}`.trim() || 'Пацієнт';
+            const sampleID = patient['ID образца.'] || '—';
+            const rawTestTime = patient['Вр.измер.'] || patient['Время взят.пр.'] || patient['Дата'] || '';
+            const { dateStr, timeStr } = splitUkrainianDateTime(rawTestTime);
+
+            let statusBadgeHTML = patient.hasAbnormalities 
+                ? `<span class="patient-pill-status pill-abnormal">⚠️ Не норма (${patient.abnormalCount})</span>`
+                : `<span class="patient-pill-status pill-normal">✅ Норма</span>`;
+
+            let biochemBadgeHTML = patient._hasBiochem
+                ? `<span class="patient-pill-biochem" title="Підключено показники біохімії (Glu, GGT)">🩸+🧪 CBC+Біохімія</span>`
+                : '';
+
             li.innerHTML = `
                 <div class="patient-item-header">
-                    <span class="patient-name">${fullName}</span>
-                    ${badgeHTML}
+                    <div class="patient-item-name">${fullName}</div>
+                    ${statusBadgeHTML}
                 </div>
-                <div class="patient-meta">
-                    <span>ID: ${sampleID}</span>
-                    <span>${dateStr} ${timeStr !== '—' ? timeStr : ''}</span>
+                <div class="patient-item-meta">
+                    <span class="meta-id">ID: <strong>${sampleID}</strong></span>
+                    <span class="meta-time">${dateStr} ${timeStr !== '—' ? timeStr : ''}</span>
                 </div>
+                ${biochemBadgeHTML ? `<div class="patient-item-badges">${biochemBadgeHTML}</div>` : ''}
             `;
+
             li.addEventListener('click', () => {
-                currentPatientIndex = idx;
-                document.querySelectorAll('.patient-item').forEach(el => el.classList.remove('active'));
-                li.classList.add('active');
+                currentPatientIndex = index;
+                renderPatientList();
                 renderCurrentPatient();
             });
+
+            li.addEventListener('contextmenu', (e) => {
+                e.preventDefault();
+                const menuItems = [];
+                if (patient._hasBiochem) {
+                    menuItems.push({
+                        label: `✕ Від'єднати біохімію (розділити)`,
+                        action: () => {
+                            currentPatientIndex = index;
+                            unlinkCurrentPatientBiochem();
+                        }
+                    });
+                }
+                menuItems.push({
+                    label: `🖨️ Друк бланка пацієнта`,
+                    action: () => {
+                        currentPatientIndex = index;
+                        renderCurrentPatient();
+                        printCurrentReport();
+                    }
+                });
+                showContextMenu(e.clientX, e.clientY, menuItems);
+            });
+
             patientList.appendChild(li);
         });
     }
 
-    // Generate Demo SVG Charts if PNGs are missing
+    // Fallback Mock SVGs
     function getDemoSVG(type) {
-        if (type === 'DIFF') {
-            return `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 100" style="background:%23f8fafc">
-                <rect width="160" height="100" fill="%23f1f5f9" stroke="%23cbd5e1"/>
-                <line x1="20" y1="90" x2="150" y2="90" stroke="%2364748b" stroke-width="1"/>
-                <line x1="20" y1="10" x2="20" y2="90" stroke="%2364748b" stroke-width="1"/>
-                <circle cx="45" cy="65" r="8" fill="%233b82f6" opacity="0.6"/>
-                <circle cx="50" cy="60" r="12" fill="%233b82f6" opacity="0.5"/>
-                <circle cx="70" cy="45" r="7" fill="%2310b981" opacity="0.6"/>
-                <circle cx="95" cy="35" r="14" fill="%23ec4899" opacity="0.6"/>
-                <circle cx="105" cy="40" r="10" fill="%23ec4899" opacity="0.5"/>
-                <circle cx="120" cy="65" r="6" fill="%23f97316" opacity="0.6"/>
-                <text x="80" y="98" font-size="7" fill="%23475569" text-anchor="middle">WBC DIFF 2D</text>
-            </svg>`;
-        }
         if (type === 'WBC') {
-            return `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 100" style="background:%23f8fafc">
-                <rect width="160" height="100" fill="%23f1f5f9" stroke="%23cbd5e1"/>
-                <path d="M20,85 Q45,25 70,55 T120,40 T145,85 Z" fill="%233b82f6" opacity="0.3" stroke="%232563eb" stroke-width="1.5"/>
-                <line x1="20" y1="85" x2="150" y2="85" stroke="%2364748b"/>
-                <text x="80" y="96" font-size="7" fill="%23475569" text-anchor="middle">Гістограма WBC</text>
-            </svg>`;
+            return `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 130" width="100%" height="100%"><rect width="240" height="130" fill="%23ffffff"/><path d="M 15 115 Q 40 115 55 90 Q 75 25 90 70 Q 110 110 140 45 Q 165 20 185 85 Q 205 115 230 115" fill="none" stroke="%230284c7" stroke-width="2.2"/><line x1="15" y1="115" x2="230" y2="115" stroke="%23475569" stroke-width="1.2"/><line x1="15" y1="15" x2="15" y2="115" stroke="%23475569" stroke-width="1.2"/><text x="110" y="127" font-size="8" font-family="Arial" fill="%23475569">WBC (fl)</text></svg>`;
         }
         if (type === 'RBC') {
-            return `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 100" style="background:%23f8fafc">
-                <rect width="160" height="100" fill="%23f1f5f9" stroke="%23cbd5e1"/>
-                <path d="M20,85 Q85,15 145,85 Z" fill="%23ef4444" opacity="0.3" stroke="%23dc2626" stroke-width="1.5"/>
-                <line x1="20" y1="85" x2="150" y2="85" stroke="%2364748b"/>
-                <text x="80" y="96" font-size="7" fill="%23475569" text-anchor="middle">Гістограма RBC</text>
-            </svg>`;
+            return `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 130" width="100%" height="100%"><rect width="240" height="130" fill="%23ffffff"/><path d="M 15 115 Q 60 115 80 80 Q 115 15 145 75 Q 170 115 230 115" fill="none" stroke="%23dc2626" stroke-width="2.2"/><line x1="15" y1="115" x2="230" y2="115" stroke="%23475569" stroke-width="1.2"/><line x1="15" y1="15" x2="15" y2="115" stroke="%23475569" stroke-width="1.2"/><text x="110" y="127" font-size="8" font-family="Arial" fill="%23475569">RBC (fl)</text></svg>`;
         }
         if (type === 'PLT') {
-            return `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 100" style="background:%23f8fafc">
-                <rect width="160" height="100" fill="%23f1f5f9" stroke="%23cbd5e1"/>
-                <path d="M20,85 Q40,10 65,60 T145,85 Z" fill="%2310b981" opacity="0.3" stroke="%23059669" stroke-width="1.5"/>
-                <line x1="20" y1="85" x2="150" y2="85" stroke="%2364748b"/>
-                <text x="80" y="96" font-size="7" fill="%23475569" text-anchor="middle">Гістограма PLT</text>
-            </svg>`;
+            return `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 130" width="100%" height="100%"><rect width="240" height="130" fill="%23ffffff"/><path d="M 15 115 Q 35 15 65 70 Q 95 110 230 115" fill="none" stroke="%2316a34a" stroke-width="2.2"/><line x1="15" y1="115" x2="230" y2="115" stroke="%23475569" stroke-width="1.2"/><line x1="15" y1="15" x2="15" y2="115" stroke="%23475569" stroke-width="1.2"/><text x="110" y="127" font-size="8" font-family="Arial" fill="%23475569">PLT (fl)</text></svg>`;
+        }
+        if (type === 'DIFF') {
+            return `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 130" width="100%" height="100%"><rect width="240" height="130" fill="%23ffffff"/><ellipse cx="140" cy="55" rx="35" ry="22" fill="%230284c7" opacity="0.75"/><ellipse cx="75" cy="80" rx="22" ry="16" fill="%2316a34a" opacity="0.75"/><ellipse cx="90" cy="45" rx="16" ry="14" fill="%239333ea" opacity="0.75"/><ellipse cx="185" cy="85" rx="14" ry="10" fill="%23ea580c" opacity="0.75"/><line x1="15" y1="115" x2="230" y2="115" stroke="%23475569" stroke-width="1.2"/><line x1="15" y1="15" x2="15" y2="115" stroke="%23475569" stroke-width="1.2"/><text x="95" y="127" font-size="8" font-family="Arial" fill="%23475569">DIFF Scattergram</text></svg>`;
         }
         return '';
     }
 
-    // Get Patient Image Data URLs (Always 100% stable Base64)
     function getPatientImages(patient) {
-        const wbcImg = patient.wbcImgData || getDemoSVG('WBC');
-        const rbcImg = patient.rbcImgData || getDemoSVG('RBC');
-        const pltImg = patient.pltImgData || getDemoSVG('PLT');
-        const diffImg = patient.diffImgData || getDemoSVG('DIFF');
-        return { wbcImg, rbcImg, pltImg, diffImg };
+        return {
+            wbcImg: patient.wbcImgData || getDemoSVG('WBC'),
+            rbcImg: patient.rbcImgData || getDemoSVG('RBC'),
+            pltImg: patient.pltImgData || getDemoSVG('PLT'),
+            diffImg: patient.diffImgData || getDemoSVG('DIFF')
+        };
     }
 
-    // Format & Evaluate Parameter Value against Norms
+    // Evaluate parameter against clinical norm boundaries
     function evaluateParameter(paramKey, rawVal) {
-        if (!rawVal || rawVal === '***.*' || rawVal === '***') {
-            return { valStr: '—', flag: '', normStr: '—' };
-        }
-
-        const numVal = parseFloat(rawVal.replace(',', '.'));
         const info = PARAMETER_INFO[paramKey];
-
-        if (!info || isNaN(numVal)) {
-            return { valStr: rawVal, flag: '', normStr: '—' };
+        if (!info) {
+            return { valStr: rawVal, normStr: '—', flag: 'NORMAL', ukrName: paramKey, code: paramKey, unit: '' };
         }
+
+        const numVal = parseFloat(String(rawVal).replace(',', '.'));
+        const valStr = isNaN(numVal) ? rawVal : numVal.toString();
+        const normStr = `${info.min} - ${info.max}`;
 
         let flag = 'NORMAL';
-        if (numVal < info.min) flag = 'LOW';
-        else if (numVal > info.max) flag = 'HIGH';
+        if (!isNaN(numVal)) {
+            if (numVal < info.min) flag = 'LOW';
+            else if (numVal > info.max) flag = 'HIGH';
+        }
 
-        const normStr = `${info.min} - ${info.max}`;
-        return { valStr: rawVal, flag, normStr, unit: info.unit, ukrName: info.ukrName, code: info.code };
+        return {
+            valStr: valStr,
+            normStr: normStr,
+            flag: flag,
+            ukrName: info.ukrName,
+            code: info.code,
+            unit: info.unit
+        };
     }
 
     /* ==========================================================================
-       PRIMARY FULL CLINICAL REPORT GENERATOR (YELLOW ALERTS REMOVED COMPLETELY)
+       A4 MEDICAL REPORT TEMPLATE GENERATOR
        ========================================================================== */
     function generateReportHTML(patient) {
         const fullName = `${patient['Фамилия'] || ''} ${patient['Имя'] || ''}`.trim() || 'Пацієнт';
         const sampleID = patient['ID образца.'] || '—';
-        const rawTestTime = patient['Вр.измер.'] || patient['Время взят.пр.'] || '—';
+        const rawTestTime = patient['Вр.измер.'] || patient['Время взят.пр.'] || patient['Дата'] || '—';
         const { dateStr, timeStr } = splitUkrainianDateTime(rawTestTime);
 
         // 100% Persistent Base64 Images
         const { wbcImg, rbcImg, pltImg, diffImg } = getPatientImages(patient);
 
-        // Build Table Rows
+        // Build Table Rows (Includes Glu and GGT cleanly!)
         const paramKeys = [
             'WBC', 'Neu%', 'Lym%', 'Mon%', 'Eos%', 'Bas%',
             'Neu#', 'Lym#', 'Mon#', 'Eos#', 'Bas#',
             'RBC', 'HGB', 'HCT', 'MCV', 'MCH', 'MCHC', 'RDW-CV', 'RDW-SD',
-            'PLT', 'MPV', 'PDW', 'PCT', 'P-LCR', 'P-LCC', 'CRP'
+            'PLT', 'MPV', 'PDW', 'PCT', 'P-LCR', 'P-LCC', 'CRP',
+            'Glu', 'GGT'
         ];
 
         let tableRowsHTML = '';
         paramKeys.forEach(key => {
             const rawVal = patient[key];
-            if (rawVal !== undefined && rawVal !== '') {
+            if (rawVal !== undefined && rawVal !== '' && rawVal !== '***.*' && rawVal !== '***') {
                 const evalRes = evaluateParameter(key, rawVal);
                 let badgeHTML = '<span class="status-badge norm">В НОРМІ</span>';
                 let resultClass = 'result-norm';
@@ -765,7 +1196,7 @@
                         <h2 class="report-main-title">ЗВІТ ЛАБОРАТОРНОГО ДОСЛІДЖЕННЯ</h2>
                     </div>
                     <div class="header-right-info">
-                        <div class="test-type-sub">Загальний аналіз крові (CBC + 5-DIFF)</div>
+                        <div class="test-type-sub">Загальний аналіз крові (CBC + 5-DIFF) ${patient._hasBiochem ? '+ Біохімія' : ''}</div>
                         <div class="facility-name">Заклад: МСЧ АРЗ СП ГУ ДСНС України у Харківській області</div>
                     </div>
                 </div>
@@ -828,78 +1259,94 @@
                 <!-- Signatures -->
                 <div class="report-footer">
                     <div class="signatures-grid">
-                        <div>Фельдшер-лаборант / Лікар: <span class="signature-line"></span></div>
-                        <div>Підпис / Печатка: <span class="signature-line"></span></div>
+                        <div class="signature-item">
+                            <span class="sig-label">Дослідження виконав:</span>
+                            <span class="sig-line">___________________</span>
+                        </div>
+                        <div class="signature-item">
+                            <span class="sig-label">Лікар-лаборант:</span>
+                            <span class="sig-line">___________________</span>
+                        </div>
+                        <div class="signature-item text-right">
+                            <span class="sig-label">Дата видачі:</span>
+                            <span class="sig-line">${dateStr}</span>
+                        </div>
                     </div>
                 </div>
             </div>
         `;
     }
 
-    // Render Currently Selected Patient (ALWAYS 1 CLEAN SINGLE REPORT ON PREVIEW CANVAS)
     function renderCurrentPatient() {
-        if (filteredPatients.length === 0) {
-            singleReportContainer.innerHTML = '<div style="padding:3rem;text-align:center;color:#64748b">Оберіть пацієнта зі списку ліворуч</div>';
+        if (filteredPatients.length === 0 || !filteredPatients[currentPatientIndex]) {
             currentPatientTitle.textContent = 'Оберіть пацієнта для перегляду';
+            singleReportContainer.innerHTML = '<div class="empty-state-card"><p>Немає даних для відображення</p></div>';
+            if (unlinkBiochemBtn) unlinkBiochemBtn.style.display = 'none';
             return;
         }
 
-        if (currentPatientIndex >= filteredPatients.length) currentPatientIndex = 0;
         const patient = filteredPatients[currentPatientIndex];
         const fullName = `${patient['Фамилия'] || ''} ${patient['Имя'] || ''}`.trim() || 'Пацієнт';
-        currentPatientTitle.textContent = `Перегляд бланка: ${fullName} (ID: ${patient['ID образца.'] || currentPatientIndex + 1})`;
+        currentPatientTitle.textContent = `${fullName} (ID: ${patient['ID образца.'] || '—'})`;
 
-        // Always render 1 clean full A4 report on screen
-        singleReportContainer.className = 'a4-preview-page';
+        // Show/hide unlink button
+        if (unlinkBiochemBtn) {
+            unlinkBiochemBtn.style.display = patient._hasBiochem ? 'inline-flex' : 'none';
+        }
+
         singleReportContainer.innerHTML = generateReportHTML(patient);
     }
 
-    // Trigger Print Window reliably
+    /* ==========================================================================
+       PRINTING & PDF EXPORT LOGIC
+       ========================================================================== */
     async function triggerPrint() {
-        const images = Array.from(printContainer.querySelectorAll('img'));
-        const loadPromises = images.map(img => {
-            if (img.complete && img.naturalHeight !== 0) return Promise.resolve();
-            return new Promise(resolve => {
-                img.onload = resolve;
-                img.onerror = resolve;
-            });
+        return new Promise((resolve) => {
+            const beforePrint = () => {};
+            const afterPrint = () => {
+                window.removeEventListener('afterprint', afterPrint);
+                resolve();
+            };
+            window.addEventListener('afterprint', afterPrint);
+            setTimeout(() => {
+                window.print();
+                setTimeout(resolve, 1500);
+            }, 300);
         });
-
-        await Promise.all(loadPromises);
-        setTimeout(() => { window.print(); }, 250);
     }
 
-    // Print Single Selected Patient
     function printCurrentReport() {
-        if (filteredPatients.length === 0) return;
-        const patient = filteredPatients[currentPatientIndex];
+        if (filteredPatients.length === 0 || !filteredPatients[currentPatientIndex]) return;
+        const currentPatient = filteredPatients[currentPatientIndex];
 
         printContainer.innerHTML = `
-            <div class="printable-page">
-                ${generateReportHTML(patient)}
+            <div class="print-page-a4">
+                ${generateReportHTML(currentPatient)}
             </div>
         `;
         triggerPrint();
     }
 
-    // Print All Filtered Reports (1 A4 sheet per patient)
     function printAllReports() {
         if (filteredPatients.length === 0) return;
 
-        let allPagesHTML = '';
-        filteredPatients.forEach(patient => {
-            allPagesHTML += `
-                <div class="printable-page">
+        let batchHTML = '';
+        filteredPatients.forEach((patient) => {
+            batchHTML += `
+                <div class="print-page-a4">
                     ${generateReportHTML(patient)}
                 </div>
             `;
         });
 
-        printContainer.innerHTML = allPagesHTML;
+        printContainer.innerHTML = batchHTML;
         triggerPrint();
     }
 
-    // Reliable Script Initialization
+    // Expose global methods for modal/UI callbacks if needed
+    window.unlinkCurrentPatientBiochem = unlinkCurrentPatientBiochem;
+
+    // Start App on DOM Ready
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
     } else {
