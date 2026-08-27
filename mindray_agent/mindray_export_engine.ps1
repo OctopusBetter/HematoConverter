@@ -3,7 +3,8 @@
  MINDRAY BS-230 ROCK-SOLID STANDALONE EXPORT ENGINE (PowerShell / .NET Native)
 ==============================================================================
  Працює 100% АВТОНОМНО на будь-якій версії Windows БЕЗ стороннього ПЗ!
- Автоматично виявляє USB-флешки будь-якого типу (Removable / Fixed / USB SCSI)
+ Автоматично витягує дані напряму з бази даних MS SQL Server (BA80).
+ Автоматично створює папку SCAN_00 на флешці, якщо її ще немає.
 ==============================================================================
 #>
 param(
@@ -142,7 +143,7 @@ function Show-TrayNotification($title, $msg) {
     } catch {}
 }
 
-# 4. Збір та експорт даних пацієнтів
+# 4. Збір та експорт даних пацієнтів (ПРЯМО З БАЗИ ДАНИХ MS SQL SERVER)
 function Export-MindrayDataToDrive {
     param(
         [Parameter(Mandatory=$true)][string]$driveRoot,
@@ -163,14 +164,16 @@ function Export-MindrayDataToDrive {
     $patientsMap = @{}
     $sqlSuccess = $false
 
-    # 4.1. Спроба підключення до MS SQL Server
-    $candidateInstances = @(".\BS240", "(local)\BS240", ".\BS230", ".")
+    # 4.1. Спроба підключення до MS SQL Server (Прямий запит до бази даних BA80)
+    $candidateInstances = @(".\BS240", "(local)\BS240", "localhost\BS240", "127.0.0.1\BS240", ".\BS230", "(local)\BS230", ".\SQLEXPRESS", "(local)", ".")
     $passwords = @("MINDRAY#BS800", "MINDRAY#BS200")
 
     foreach ($inst in $candidateInstances) {
         if ($sqlSuccess) { break }
+        
+        # Спроба 1: SQL Authentication
         foreach ($pass in $passwords) {
-            $connStr = "Server=$inst;Database=BA80;User Id=sa;Password=$pass;Connect Timeout=1;"
+            $connStr = "Server=$inst;Database=BA80;User Id=sa;Password=$pass;Connect Timeout=2;"
             try {
                 $conn = New-Object System.Data.SqlClient.SqlConnection($connStr)
                 $conn.Open()
@@ -234,15 +237,86 @@ function Export-MindrayDataToDrive {
                     elseif ($chem.Contains("GT") -or $chem.Contains("GGT")) { $patientsMap[$key].GGT = $val }
                 }
                 $sqlSuccess = $true
-                Write-Log "SQL Server успішно підключено ($inst): знайдено $($patientsMap.Count) записів" "Green"
+                Write-Log "🟢 Успішно підключено до бази даних MS SQL Server ($inst, BA80): зчитано $($patientsMap.Count) пацієнтів!" "Green"
+                break
+            } catch {}
+        }
+
+        # Спроба 2: Windows Authentication (якщо SQL auth вимкнено)
+        if (-not $sqlSuccess) {
+            $connStrWin = "Server=$inst;Database=BA80;Integrated Security=True;Connect Timeout=2;"
+            try {
+                $conn = New-Object System.Data.SqlClient.SqlConnection($connStrWin)
+                $conn.Open()
+                $sql = @"
+                SELECT 
+                    s.UID AS SampleUID,
+                    COALESCE(s.SampleID, '') AS SampleID,
+                    COALESCE(p.Name, '') AS PatientName,
+                    s.SampleTime,
+                    c.ShortName AS ChemCode,
+                    c.Name AS ChemName,
+                    r.ConcResult AS ResultVal,
+                    r.ResultUnit AS Unit,
+                    r.ResultFlag AS Flag
+                FROM PtSample s WITH (NOLOCK)
+                LEFT JOIN Patient p WITH (NOLOCK) ON s.PtUID = p.UID
+                JOIN CCTestResult r WITH (NOLOCK) ON r.SampleUID = s.UID
+                JOIN Chemistry c WITH (NOLOCK) ON r.ChemUID = c.UID
+                ORDER BY s.SampleTime DESC, s.SampleID ASC
+"@
+                $cmd = New-Object System.Data.SqlClient.SqlCommand($sql, $conn)
+                $adapter = New-Object System.Data.SqlClient.SqlDataAdapter($cmd)
+                $table = New-Object System.Data.DataTable
+                $adapter.Fill($table) | Out-Null
+                $conn.Close()
+
+                foreach ($row in $table.Rows) {
+                    $sid = "$($row.SampleID)".Trim()
+                    $pname = "$($row.PatientName)".Trim()
+                    $stime = "$($row.SampleTime)"
+                    $chem = "$($row.ChemCode)".ToUpper()
+                    $val = "$($row.ResultVal)".Trim()
+
+                    $dstr = ""
+                    $tstr = ""
+                    if ($stime) {
+                        try {
+                            $dt = [datetime]::Parse($stime)
+                            $dstr = $dt.ToString("dd.MM.yyyy")
+                            $tstr = $dt.ToString("HH:mm:ss")
+                        } catch {
+                            $pts = $stime.Split(' ')
+                            if ($pts.Length -ge 1) { $dstr = $pts[0] }
+                            if ($pts.Length -ge 2) { $tstr = $pts[1] }
+                        }
+                    }
+
+                    $key = "${dstr}_${sid}_${pname}"
+                    if (-not $patientsMap.ContainsKey($key)) {
+                        $patientsMap[$key] = [PSCustomObject]@{
+                            SampleID = $sid
+                            PatientName = $pname
+                            Date = $dstr
+                            Time = $tstr
+                            Glu = ""
+                            GGT = ""
+                        }
+                    }
+
+                    if ($chem.Contains("GLU")) { $patientsMap[$key].Glu = $val }
+                    elseif ($chem.Contains("GT") -or $chem.Contains("GGT")) { $patientsMap[$key].GGT = $val }
+                }
+                $sqlSuccess = $true
+                Write-Log "🟢 Успішно підключено до бази даних MS SQL Server ($inst, BA80, Windows Auth): зчитано $($patientsMap.Count) пацієнтів!" "Green"
                 break
             } catch {}
         }
     }
 
-    # 4.2. Резервний парсинг PrintOutput *.out файлів (Безпечний строковий парсер без regex)
+    # 4.2. Резервний парсинг PrintOutput *.out файлів (тільки якщо служба SQL вимкнена)
     if (-not $sqlSuccess -or $patientsMap.Count -eq 0) {
-        Write-Log "SQL недоступний, миттєвий парсинг PrintOutput файлів з: $mindrayDir" "Yellow"
+        Write-Log "Служба SQL тимчасово недоступна, зчитування з локального буфера: $mindrayDir" "Yellow"
         $printOutDir = [System.IO.Path]::Combine($mindrayDir, "PrintOutput")
         if ([System.IO.Directory]::Exists($printOutDir)) {
             $outFiles = Get-ChildItem -Path $printOutDir -Filter "*.out" -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime
@@ -386,7 +460,6 @@ while ($true) {
         
         foreach ($d in $drives) {
             if (-not $processedDrives.Contains($d)) {
-                # Запобігаємо спаму: одразу додаємо в оброблені перед викликом
                 $processedDrives.Add($d) | Out-Null
                 
                 $destFolder = [System.IO.Path]::Combine($d, "SCAN_00")
