@@ -12,8 +12,19 @@ set "SCRIPT_DIR=%~dp0"
 set "BAT_FILE=%SCRIPT_DIR%run_exporter_window.bat"
 set "STARTUP_DIR=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
 
+:: 1. Проверка Python
+python --version >nul 2>&1
+if %errorlevel% neq 0 (
+    py --version >nul 2>&1
+    if %errorlevel% neq 0 (
+        echo [!] Python не обнаружен. Запускаем автоматическую установку...
+        call "%SCRIPT_DIR%install_python.bat"
+    )
+)
+
+echo.
 echo [1/3] Остановка старых фоновых окон...
-powershell -NoProfile -Command "Get-Process python, pythonw, powershell, wscript -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -match 'MINDRAY' -or $_.CommandLine -match 'mindray' } | Stop-Process -Force -ErrorAction SilentlyContinue" >nul 2>&1
+powershell -NoProfile -Command "Get-Process python, pythonw, powershell, wscript, cmd -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -match 'MINDRAY' -or $_.CommandLine -match 'mindray' } | Stop-Process -Force -ErrorAction SilentlyContinue" >nul 2>&1
 echo   -^> Предыдущие процессы остановлены.
 
 echo.
