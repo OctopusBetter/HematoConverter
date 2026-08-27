@@ -149,9 +149,15 @@ function Export-MindrayDataToDrive {
         [Parameter(Mandatory=$true)][string]$mindrayDir
     )
 
+    # 4.0. Автоматичне створення папки SCAN_00, якщо її ще немає на флешці
     $targetDir = [System.IO.Path]::Combine($driveRoot, "SCAN_00")
     if (-not [System.IO.Directory]::Exists($targetDir)) {
-        [System.IO.Directory]::CreateDirectory($targetDir) | Out-Null
+        try {
+            [System.IO.Directory]::CreateDirectory($targetDir) | Out-Null
+            Write-Log "Створено папку SCAN_00 на флешці ($targetDir)" "DarkGray"
+        } catch {
+            Write-Log "Попередження: не вдалося створити $targetDir : $_" "Yellow"
+        }
     }
 
     $patientsMap = @{}
@@ -367,7 +373,7 @@ if ($Once) {
 }
 
 # ==============================================================================
-# ГОЛОВНИЙ ФОНОВИЙ ЦИКЛ СЛУЖБИ
+# ГОЛОВНИЙ ФОНОВИЙ ЦИКЛ СЛУЖБИ (З анти-спам захистом та чистим виводом)
 # ==============================================================================
 Write-Log " Очікування підключення USB-флешки..." "Gray"
 Write-Log "============================================================" "Cyan"
@@ -380,15 +386,22 @@ while ($true) {
         
         foreach ($d in $drives) {
             if (-not $processedDrives.Contains($d)) {
+                # Запобігаємо спаму: одразу додаємо в оброблені перед викликом
+                $processedDrives.Add($d) | Out-Null
+                
                 $destFolder = [System.IO.Path]::Combine($d, "SCAN_00")
                 Write-Log "Виявлено нову USB-флешку: $d" "Green"
-                $count = Export-MindrayDataToDrive -driveRoot $d -mindrayDir $MindrayDir
-                Show-TrayNotification "Mindray BS-230 Exporter" "Аналізи біохімії скопійовано на флешку: $count записів."
-                $processedDrives.Add($d) | Out-Null
+                
+                try {
+                    $count = Export-MindrayDataToDrive -driveRoot $d -mindrayDir $MindrayDir
+                    Show-TrayNotification "Mindray BS-230 Exporter" "Аналізи біохімії скопійовано на флешку: $count записів."
+                } catch {
+                    Write-Log "Помилка експорту на $d : $_" "Red"
+                }
             }
         }
 
-        # Очищення витягнутих флешок
+        # Очищення витягнутих флешок (коли користувач виймає флешку з порту)
         $toRemove = @()
         foreach ($p in $processedDrives) {
             if ($drives -notcontains $p) {
