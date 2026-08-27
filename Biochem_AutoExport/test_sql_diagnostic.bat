@@ -1,6 +1,6 @@
-@echo off
+﻿@echo off
 chcp 65001 >nul
-title Диагностика SQL Server Mindray BS-230/240
+title Р”РёР°РіРЅРѕСЃС‚РёРєР° SQL Server Mindray BS-230/240
 color 0b
 
 if exist "%~dp0python\python.exe" (
@@ -11,3 +11,4 @@ if exist "%~dp0python\python.exe" (
 
 echo.
 pause
+
