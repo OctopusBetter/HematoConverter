@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 MINDRAY BS-230 / BS-240 USB AUTO-EXPORTER (PYTHON NATIVE)
-- Прямой экспорт всей базы (433+ образцов) из MS SQL Server (BA80).
-- Моментальный групповой SQL-запрос за 0.02 секунды.
-- Сохранение в SCAN_00 на USB-флешку.
-- Звуковой сигнал + голосовое подтверждение Windows.
+- Прямой стриминг 433+ анализов из MS SQL Server (BA80) через SqlDataReader.
+- Моментальная группировка и сохранение в SCAN_00 на USB-флешку.
+- Звуковой сигнал + голосовое оповещение Windows.
 """
 
 import os
@@ -97,72 +96,87 @@ def get_usb_drives():
         bitmask >>= 1
     return drives
 
-def export_sql_direct_to_csv(target_csv_path):
+def fetch_patients_from_sql():
     inst = get_sql_instance()
-    log(f"🔍 Экспорт из базы данных SQL ({inst} -> BA80)...")
-    safe_target = target_csv_path.replace("\\", "\\\\")
-    ps_cmd = '''
+    log(f"🔍 Запрос к базе данных SQL ({inst} -> BA80)...")
+    ps_script = '''
 $inst = "''' + inst + '''"
 $db = "BA80"
 $passwords = @("MINDRAY#BS800", "MINDRAY#BS200", "MINDRAY#BA80", "mindray", "sa", "")
-$sql = "SELECT COALESCE(s.SampleID, '') AS [ID образца.], SUBSTRING(COALESCE(p.Name, ''), 1, CHARINDEX(' ', COALESCE(p.Name, '') + ' ') - 1) AS [Фамилия], LTRIM(SUBSTRING(COALESCE(p.Name, ''), CHARINDEX(' ', COALESCE(p.Name, '') + ' '), 100)) AS [Имя], COALESCE(p.Name, '') AS [ФИО], CONVERT(VARCHAR(10), s.SampleTime, 104) AS [Дата], CONVERT(VARCHAR(8), s.SampleTime, 108) AS [Время], MAX(CASE WHEN c.ShortName LIKE '%GLU%' THEN r.ConcResult ELSE '' END) AS [Glu], MAX(CASE WHEN c.ShortName LIKE '%GT%' THEN r.ConcResult ELSE '' END) AS [GGT], 'BIOCHEM' AS [Тип_анализа] FROM PtSample s WITH (NOLOCK) LEFT JOIN Patient p WITH (NOLOCK) ON s.PtUID = p.UID JOIN CCTestResult r WITH (NOLOCK) ON r.SampleUID = s.UID JOIN Chemistry c WITH (NOLOCK) ON r.ChemUID = c.UID GROUP BY s.UID, s.SampleID, p.Name, s.SampleTime ORDER BY s.SampleTime ASC"
+$sql = "SELECT s.UID AS SampleUID, COALESCE(s.SampleID, '') AS SampleID, COALESCE(p.Name, '') AS PatientName, s.SampleTime, c.ShortName AS ChemCode, r.ConcResult AS ResultVal FROM PtSample s WITH (NOLOCK) LEFT JOIN Patient p WITH (NOLOCK) ON s.PtUID = p.UID JOIN CCTestResult r WITH (NOLOCK) ON r.SampleUID = s.UID JOIN Chemistry c WITH (NOLOCK) ON r.ChemUID = c.UID ORDER BY s.SampleTime ASC"
 $connected = $false
-$table = New-Object System.Data.DataTable
-$connStr = "Server=$inst;Database=$db;Integrated Security=True;Connect Timeout=3;"
+$conn = $null
+# 1. Windows Auth
 try {
-    $conn = New-Object System.Data.SqlClient.SqlConnection($connStr)
+    $conn = New-Object System.Data.SqlClient.SqlConnection("Server=$inst;Database=$db;Integrated Security=True;Connect Timeout=3;")
     $conn.Open()
-    if ($conn.State -eq "Open") {
-        $cmd = New-Object System.Data.SqlClient.SqlCommand($sql, $conn)
-        $adapter = New-Object System.Data.SqlClient.SqlDataAdapter($cmd)
-        $adapter.Fill($table) | Out-Null
-        $conn.Close()
-        $connected = $true
-    }
+    if ($conn.State -eq "Open") { $connected = $true }
 } catch {}
+# 2. sa passwords
 if (-not $connected) {
     foreach ($pwd in $passwords) {
-        $connStr = "Server=$inst;Database=$db;User Id=sa;Password=$pwd;Connect Timeout=2;"
         try {
-            $conn = New-Object System.Data.SqlClient.SqlConnection($connStr)
+            $conn = New-Object System.Data.SqlClient.SqlConnection("Server=$inst;Database=$db;User Id=sa;Password=$pwd;Connect Timeout=2;")
             $conn.Open()
-            if ($conn.State -eq "Open") {
-                $cmd = New-Object System.Data.SqlClient.SqlCommand($sql, $conn)
-                $adapter = New-Object System.Data.SqlClient.SqlDataAdapter($cmd)
-                $adapter.Fill($table) | Out-Null
-                $conn.Close()
-                $connected = $true
-                break
-            }
+            if ($conn.State -eq "Open") { $connected = $true; break }
         } catch {}
     }
 }
-if ($connected -and $table.Rows.Count -gt 0) {
-    $csvPath = "''' + safe_target + '''"
-    $lines = [System.Collections.Generic.List[string]]::new()
-    $lines.Add('"ID образца.","Фамилия","Имя","ФИО","Дата","Время","Glu","GGT","Тип_анализа"')
-    foreach ($row in $table.Rows) {
-        $line = '"{0}","{1}","{2}","{3}","{4}","{5}","{6}","{7}","BIOCHEM"' -f $row['ID образца.'], $row['Фамилия'], $row['Имя'], $row['ФИО'], $row['Дата'], $row['Время'], $row['Glu'], $row['GGT']
-        $lines.Add($line)
+if ($connected) {
+    $cmd = New-Object System.Data.SqlClient.SqlCommand($sql, $conn)
+    $reader = $cmd.ExecuteReader()
+    while ($reader.Read()) {
+        $uid = $reader["SampleUID"]
+        $sid = $reader["SampleID"]
+        $pname = $reader["PatientName"]
+        $stime = $reader["SampleTime"]
+        $chem = $reader["ChemCode"]
+        $val = $reader["ResultVal"]
+        [Console]::WriteLine("ROW|$uid|$sid|$pname|$stime|$chem|$val")
     }
-    [System.IO.File]::WriteAllLines($csvPath, $lines, [System.Text.Encoding]::UTF8)
-    Write-Host ("SUCCESS_COUNT:" + $table.Rows.Count)
+    $reader.Close()
+    $conn.Close()
 } else {
-    Write-Host "FAILED_TO_QUERY"
+    Write-Host "SQL_CONNECTION_FAILED"
 }
 '''
+    patients = {}
+    glu_cnt, ggt_cnt = 0, 0
     try:
-        proc = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd], capture_output=True, text=True, timeout=10)
-        out = proc.stdout.strip()
-        if "SUCCESS_COUNT:" in out:
-            cnt = out.split("SUCCESS_COUNT:")[1].strip().split()[0]
-            log(f"🟢 УСПЕХ: База данных SQL успешно экспортирована! Извлечено {cnt} образцов.")
-            return int(cnt)
+        proc = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script], capture_output=True, text=True, timeout=15)
+        lines = proc.stdout.splitlines()
+        for line in lines:
+            line = line.strip()
+            if line.startswith("ROW|"):
+                parts = line.split("|")
+                if len(parts) >= 7:
+                    _, uid, sid, pname, stime, chem, val = parts[:7]
+                    sid = sid.strip()
+                    pname = pname.strip()
+                    chem = chem.strip().upper()
+                    val = val.strip()
+                    dstr, tstr = "", ""
+                    if stime:
+                        sp = stime.split()
+                        if len(sp) >= 1: dstr = sp[0]
+                        if len(sp) >= 2: tstr = sp[1]
+                    key = f"{uid}_{dstr}_{sid}_{pname}"
+                    if key not in patients:
+                        patients[key] = {"SampleID": sid, "PatientName": pname, "Date": dstr, "Time": tstr, "Glu": "", "GGT": ""}
+                    if "GLU" in chem:
+                        patients[key]["Glu"] = val
+                        glu_cnt += 1
+                    elif "GT" in chem or "GGT" in chem:
+                        patients[key]["GGT"] = val
+                        ggt_cnt += 1
+        if patients:
+            log(f"🟢 УСПЕХ: Извлечено из SQL Server {len(patients)} пациентов (Glu: {glu_cnt}, GGT: {ggt_cnt})!")
+            return patients
         else:
-            log(f"SQL ответ: {out}")
+            log(f"Ответ SQL: {proc.stdout.strip()[:100]}")
     except Exception as e:
-        log(f"Ошибка выполнения: {e}")
-    return 0
+        log(f"Ошибка запроса к базе SQL: {e}")
+    return {}
 
 def export_to_drive(drive_path):
     target_dir = os.path.join(drive_path, "SCAN_00")
@@ -173,14 +187,24 @@ def export_to_drive(drive_path):
         except Exception as e:
             log(f"Ошибка создания папки {target_dir}: {e}")
             return 0
+    patients = fetch_patients_from_sql()
+    if not patients:
+        log("⚠️ База данных не вернула записей.")
+        return 0
     today_str = datetime.datetime.now().strftime("%Y-%m-%d")
     csv_path = os.path.join(target_dir, f"SampleInfo_Biochem_{today_str}.csv")
-    count = export_sql_direct_to_csv(csv_path)
-    if count > 0:
-        log(f"✅ УСПЕШНО СОХРАНЕНО: {count} пациентов -> {csv_path}")
-    else:
-        log("⚠️ База вернула 0 записей.")
-    return count
+    csv_lines = ['"ID образца.","Фамилия","Имя","ФИО","Дата","Время","Glu","GGT","Тип_анализа"\n']
+    for p in patients.values():
+        full_name = p["PatientName"]
+        parts = full_name.split(" ", 1)
+        last_name = parts[0] if len(parts) > 0 else ""
+        first_name = parts[1] if len(parts) > 1 else ""
+        line = f'"{p["SampleID"]}","{last_name}","{first_name}","{full_name}","{p["Date"]}","{p["Time"]}","{p["Glu"]}","{p["GGT"]}","BIOCHEM"\n'
+        csv_lines.append(line)
+    with open(csv_path, "w", encoding="utf-8-sig") as f:
+        f.writelines(csv_lines)
+    log(f"✅ УСПЕШНО СОХРАНЕНО: {len(patients)} пациентов -> {csv_path}")
+    return len(patients)
 
 def main():
     once = "--once" in sys.argv
