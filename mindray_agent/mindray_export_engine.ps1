@@ -3,9 +3,10 @@
  MINDRAY BS-230 ROCK-SOLID STANDALONE EXPORT ENGINE (PowerShell / .NET Native)
 ==============================================================================
  1. 100% АВТОНОМНИЙ (PowerShell + .NET Native, без сторонніх залежностей)
- 2. РОЗУМНИЙ ІНКРЕМЕНТНИЙ ЕКСПОРТ (дозаписує тільки нові/змінені аналізи)
- 3. АУДІО ТА ГОЛОСОВЕ СПОВІЩЕННЯ (Windows System Chime + TTS Speech)
- 4. АВТОМАТИЧНЕ СТВОРЕННЯ SCAN_00 на будь-якій USB-флешці
+ 2. ПОВНЕ АВТОМАТИЧНЕ ВИЗНАЧЕННЯ SQL SERVER (служби, реєстр, автозапуск)
+ 3. РОЗУМНИЙ ІНКРЕМЕНТНИЙ ЕКСПОРТ (дозаписує тільки нові/змінені аналізи)
+ 4. АУДІО ТА ГОЛОСОВЕ СПОВІЩЕННЯ (Windows System Chime + TTS Speech)
+ 5. АВТОМАТИЧНЕ СТВОРЕННЯ SCAN_00 на будь-якій USB-флешці
 ==============================================================================
 #>
 param(
@@ -127,19 +128,16 @@ function Get-TargetUsbDrives {
 
 # 3. Аудіо, Голосове та Візуальне Сповіщення
 function Notify-ExportComplete($title, $msg, $spokenText = "Биохимия скопирована на флешку") {
-    # 3.1. Звуковий сигнал Windows Chime
     try {
         [System.Media.SystemSounds]::Asterisk.Play()
     } catch {}
 
-    # 3.2. Голосове сповіщення Windows Speech TTS (фонове асинхронне)
     try {
         [void] [System.Reflection.Assembly]::LoadWithPartialName("System.Speech")
         $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
         $synth.SpeakAsync($spokenText) | Out-Null
     } catch {}
 
-    # 3.3. Спливаюче сповіщення Windows у правому нижньому кутку
     try {
         [void] [System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms")
         $notify = New-Object System.Windows.Forms.NotifyIcon
@@ -151,14 +149,162 @@ function Notify-ExportComplete($title, $msg, $spokenText = "Биохимия с�
     } catch {}
 }
 
-# 4. Збір та Розумний Інкрементний Експорт Даних Пацієнтів
+# 4. Виконання SQL-запиту до відкритих з'єднань
+function Query-MindraySqlTable($conn) {
+    $sql = @"
+    SELECT 
+        s.UID AS SampleUID,
+        COALESCE(s.SampleID, '') AS SampleID,
+        COALESCE(p.Name, '') AS PatientName,
+        s.SampleTime,
+        c.ShortName AS ChemCode,
+        c.Name AS ChemName,
+        r.ConcResult AS ResultVal,
+        r.ResultUnit AS Unit,
+        r.ResultFlag AS Flag
+    FROM PtSample s WITH (NOLOCK)
+    LEFT JOIN Patient p WITH (NOLOCK) ON s.PtUID = p.UID
+    JOIN CCTestResult r WITH (NOLOCK) ON r.SampleUID = s.UID
+    JOIN Chemistry c WITH (NOLOCK) ON r.ChemUID = c.UID
+    ORDER BY s.SampleTime DESC, s.SampleID ASC
+"@
+    $cmd = New-Object System.Data.SqlClient.SqlCommand($sql, $conn)
+    $cmd.CommandTimeout = 10
+    $adapter = New-Object System.Data.SqlClient.SqlDataAdapter($cmd)
+    $table = New-Object System.Data.DataTable
+    $adapter.Fill($table) | Out-Null
+
+    $resMap = @{}
+    foreach ($row in $table.Rows) {
+        $sid = "$($row.SampleID)".Trim()
+        $pname = "$($row.PatientName)".Trim()
+        $stime = "$($row.SampleTime)"
+        $chem = "$($row.ChemCode)".ToUpper()
+        $val = "$($row.ResultVal)".Trim()
+
+        $dstr = ""
+        $tstr = ""
+        if ($stime) {
+            try {
+                $dt = [datetime]::Parse($stime)
+                $dstr = $dt.ToString("dd.MM.yyyy")
+                $tstr = $dt.ToString("HH:mm:ss")
+            } catch {
+                $pts = $stime.Split(' ')
+                if ($pts.Length -ge 1) { $dstr = $pts[0] }
+                if ($pts.Length -ge 2) { $tstr = $pts[1] }
+            }
+        }
+
+        $key = "${dstr}_${sid}_${pname}"
+        if (-not $resMap.ContainsKey($key)) {
+            $resMap[$key] = [PSCustomObject]@{
+                SampleID = $sid
+                PatientName = $pname
+                Date = $dstr
+                Time = $tstr
+                Glu = ""
+                GGT = ""
+            }
+        }
+
+        if ($chem.Contains("GLU")) { $resMap[$key].Glu = $val }
+        elseif ($chem.Contains("GT") -or $chem.Contains("GGT")) { $resMap[$key].GGT = $val }
+    }
+    return $resMap
+}
+
+# 5. Повний автоматичний пошук та підключення до MS SQL Server
+function Get-MindraySqlPatients {
+    $foundServiceInstances = @()
+
+    # 5.1. Пошук запущених служб SQL Server у Windows
+    try {
+        $services = Get-Service | Where-Object { $_.Name -like "MSSQL*" -or $_.DisplayName -like "*SQL Server*" }
+        foreach ($svc in $services) {
+            if ($svc.Status -ne "Running") {
+                try { Start-Service $svc.Name -ErrorAction SilentlyContinue } catch {}
+            }
+            if ($svc.Name -match "MSSQL\$(.*)") {
+                $instName = $matches[1]
+                $foundServiceInstances += ".\$instName"
+                $foundServiceInstances += "(local)\$instName"
+                $foundServiceInstances += "$($env:COMPUTERNAME)\$instName"
+            } elseif ($svc.Name -eq "MSSQLSERVER") {
+                $foundServiceInstances += "."
+                $foundServiceInstances += "(local)"
+                $foundServiceInstances += "$($env:COMPUTERNAME)"
+            }
+        }
+    } catch {}
+
+    # 5.2. Вибір цільових екземплярів
+    $instances = if ($foundServiceInstances.Count -gt 0) { 
+        $foundServiceInstances 
+    } else { 
+        @(".\BS240", "(local)\BS240", ".\BS230", "(local)\BS230", ".\BS200", ".\BA80", ".\SQLEXPRESS", "(local)", ".") 
+    }
+
+    $passwords = @("MINDRAY#BS800", "MINDRAY#BS200", "Mindray#BS800", "Mindray#BS200", "mindray#bs800", "mindray", "MINDRAY", "123456", "sa", "")
+    $databases = @("BA80", "BS240", "BS230", "BS200", "MindrayBA", "BA40")
+
+    $connected = $false
+    $lastErr = ""
+
+    foreach ($inst in $instances) {
+        if ($connected) { break }
+        
+        # 1. Спроба Windows Authentication
+        foreach ($db in $databases) {
+            if ($connected) { break }
+            $connStr = "Server=$inst;Database=$db;Integrated Security=True;Connect Timeout=1;"
+            try {
+                $conn = New-Object System.Data.SqlClient.SqlConnection($connStr)
+                $conn.Open()
+                $map = Query-MindraySqlTable -conn $conn
+                $conn.Close()
+                if ($map -ne $null) {
+                    Write-Log "🟢 УСПІХ: Зчитано $($map.Count) пацієнтів напряму з бази SQL ($inst, база $db, Windows Auth)!" "Green"
+                    return $map
+                }
+            } catch {
+                $lastErr = $_.Exception.Message
+            }
+        }
+
+        # 2. Спроба SQL Authentication (sa)
+        foreach ($pass in $passwords) {
+            if ($connected) { break }
+            foreach ($db in $databases) {
+                if ($connected) { break }
+                $connStr = "Server=$inst;Database=$db;User Id=sa;Password=$pass;Connect Timeout=1;"
+                try {
+                    $conn = New-Object System.Data.SqlClient.SqlConnection($connStr)
+                    $conn.Open()
+                    $map = Query-MindraySqlTable -conn $conn
+                    $conn.Close()
+                    if ($map -ne $null) {
+                        Write-Log "🟢 УСПІХ: Зчитано $($map.Count) пацієнтів напряму з бази SQL ($inst, база $db, пароль sa)!" "Green"
+                        return $map
+                    }
+                } catch {
+                    $lastErr = $_.Exception.Message
+                }
+            }
+        }
+    }
+
+    Write-Log "⚠️ Не вдалося підключитися до SQL: $lastErr" "Yellow"
+    return @{}
+}
+
+# 6. Збір та Розумний Інкрементний Експорт Даних
 function Export-MindrayDataToDrive {
     param(
         [Parameter(Mandatory=$true)][string]$driveRoot,
         [Parameter(Mandatory=$true)][string]$mindrayDir
     )
 
-    # 4.0. Автоматичне створення папки SCAN_00, якщо її ще немає
     $targetDir = [System.IO.Path]::Combine($driveRoot, "SCAN_00")
     if (-not [System.IO.Directory]::Exists($targetDir)) {
         try {
@@ -169,162 +315,12 @@ function Export-MindrayDataToDrive {
         }
     }
 
-    $patientsMap = @{}
-    $sqlSuccess = $false
+    # 6.1. ПРЯМИЙ ЕКСПОРТ З БАЗИ ДАНИХ SQL SERVER
+    $patientsMap = Get-MindraySqlPatients
 
-    # 4.1. Спроба підключення до MS SQL Server (Прямий запит до бази BA80)
-    $candidateInstances = @(".\BS240", "(local)\BS240", ".\BS230", ".")
-    $passwords = @("MINDRAY#BS800", "MINDRAY#BS200")
-
-    foreach ($inst in $candidateInstances) {
-        if ($sqlSuccess) { break }
-        
-        # Спроба SQL Auth
-        foreach ($pass in $passwords) {
-            $connStr = "Server=$inst;Database=BA80;User Id=sa;Password=$pass;Connect Timeout=1;"
-            try {
-                $conn = New-Object System.Data.SqlClient.SqlConnection($connStr)
-                $conn.Open()
-                $sql = @"
-                SELECT 
-                    s.UID AS SampleUID,
-                    COALESCE(s.SampleID, '') AS SampleID,
-                    COALESCE(p.Name, '') AS PatientName,
-                    s.SampleTime,
-                    c.ShortName AS ChemCode,
-                    c.Name AS ChemName,
-                    r.ConcResult AS ResultVal,
-                    r.ResultUnit AS Unit,
-                    r.ResultFlag AS Flag
-                FROM PtSample s WITH (NOLOCK)
-                LEFT JOIN Patient p WITH (NOLOCK) ON s.PtUID = p.UID
-                JOIN CCTestResult r WITH (NOLOCK) ON r.SampleUID = s.UID
-                JOIN Chemistry c WITH (NOLOCK) ON r.ChemUID = c.UID
-                ORDER BY s.SampleTime DESC, s.SampleID ASC
-"@
-                $cmd = New-Object System.Data.SqlClient.SqlCommand($sql, $conn)
-                $adapter = New-Object System.Data.SqlClient.SqlDataAdapter($cmd)
-                $table = New-Object System.Data.DataTable
-                $adapter.Fill($table) | Out-Null
-                $conn.Close()
-
-                foreach ($row in $table.Rows) {
-                    $sid = "$($row.SampleID)".Trim()
-                    $pname = "$($row.PatientName)".Trim()
-                    $stime = "$($row.SampleTime)"
-                    $chem = "$($row.ChemCode)".ToUpper()
-                    $val = "$($row.ResultVal)".Trim()
-
-                    $dstr = ""
-                    $tstr = ""
-                    if ($stime) {
-                        try {
-                            $dt = [datetime]::Parse($stime)
-                            $dstr = $dt.ToString("dd.MM.yyyy")
-                            $tstr = $dt.ToString("HH:mm:ss")
-                        } catch {
-                            $pts = $stime.Split(' ')
-                            if ($pts.Length -ge 1) { $dstr = $pts[0] }
-                            if ($pts.Length -ge 2) { $tstr = $pts[1] }
-                        }
-                    }
-
-                    $key = "${dstr}_${sid}_${pname}"
-                    if (-not $patientsMap.ContainsKey($key)) {
-                        $patientsMap[$key] = [PSCustomObject]@{
-                            SampleID = $sid
-                            PatientName = $pname
-                            Date = $dstr
-                            Time = $tstr
-                            Glu = ""
-                            GGT = ""
-                        }
-                    }
-
-                    if ($chem.Contains("GLU")) { $patientsMap[$key].Glu = $val }
-                    elseif ($chem.Contains("GT") -or $chem.Contains("GGT")) { $patientsMap[$key].GGT = $val }
-                }
-                $sqlSuccess = $true
-                Write-Log "🟢 Успішно підключено до бази даних MS SQL ($inst, BA80): зчитано $($patientsMap.Count) пацієнтів!" "Green"
-                break
-            } catch {}
-        }
-
-        # Спроба Windows Auth
-        if (-not $sqlSuccess) {
-            $connStrWin = "Server=$inst;Database=BA80;Integrated Security=True;Connect Timeout=1;"
-            try {
-                $conn = New-Object System.Data.SqlClient.SqlConnection($connStrWin)
-                $conn.Open()
-                $sql = @"
-                SELECT 
-                    s.UID AS SampleUID,
-                    COALESCE(s.SampleID, '') AS SampleID,
-                    COALESCE(p.Name, '') AS PatientName,
-                    s.SampleTime,
-                    c.ShortName AS ChemCode,
-                    c.Name AS ChemName,
-                    r.ConcResult AS ResultVal,
-                    r.ResultUnit AS Unit,
-                    r.ResultFlag AS Flag
-                FROM PtSample s WITH (NOLOCK)
-                LEFT JOIN Patient p WITH (NOLOCK) ON s.PtUID = p.UID
-                JOIN CCTestResult r WITH (NOLOCK) ON r.SampleUID = s.UID
-                JOIN Chemistry c WITH (NOLOCK) ON r.ChemUID = c.UID
-                ORDER BY s.SampleTime DESC, s.SampleID ASC
-"@
-                $cmd = New-Object System.Data.SqlClient.SqlCommand($sql, $conn)
-                $adapter = New-Object System.Data.SqlClient.SqlDataAdapter($cmd)
-                $table = New-Object System.Data.DataTable
-                $adapter.Fill($table) | Out-Null
-                $conn.Close()
-
-                foreach ($row in $table.Rows) {
-                    $sid = "$($row.SampleID)".Trim()
-                    $pname = "$($row.PatientName)".Trim()
-                    $stime = "$($row.SampleTime)"
-                    $chem = "$($row.ChemCode)".ToUpper()
-                    $val = "$($row.ResultVal)".Trim()
-
-                    $dstr = ""
-                    $tstr = ""
-                    if ($stime) {
-                        try {
-                            $dt = [datetime]::Parse($stime)
-                            $dstr = $dt.ToString("dd.MM.yyyy")
-                            $tstr = $dt.ToString("HH:mm:ss")
-                        } catch {
-                            $pts = $stime.Split(' ')
-                            if ($pts.Length -ge 1) { $dstr = $pts[0] }
-                            if ($pts.Length -ge 2) { $tstr = $pts[1] }
-                        }
-                    }
-
-                    $key = "${dstr}_${sid}_${pname}"
-                    if (-not $patientsMap.ContainsKey($key)) {
-                        $patientsMap[$key] = [PSCustomObject]@{
-                            SampleID = $sid
-                            PatientName = $pname
-                            Date = $dstr
-                            Time = $tstr
-                            Glu = ""
-                            GGT = ""
-                        }
-                    }
-
-                    if ($chem.Contains("GLU")) { $patientsMap[$key].Glu = $val }
-                    elseif ($chem.Contains("GT") -or $chem.Contains("GGT")) { $patientsMap[$key].GGT = $val }
-                }
-                $sqlSuccess = $true
-                Write-Log "🟢 Успішно підключено до бази даних MS SQL (Windows Auth, BA80): зчитано $($patientsMap.Count) пацієнтів!" "Green"
-                break
-            } catch {}
-        }
-    }
-
-    # 4.2. Резервний парсинг PrintOutput *.out файлів
-    if (-not $sqlSuccess -or $patientsMap.Count -eq 0) {
-        Write-Log "Служба SQL тимчасово недоступна, зчитування з локального буфера: $mindrayDir" "Yellow"
+    # 6.2. Резервний парсинг PrintOutput тільки якщо SQL повернув 0
+    if ($patientsMap.Count -eq 0) {
+        Write-Log "SQL не повернув даних, зчитування з локального буфера: $mindrayDir" "Yellow"
         $printOutDir = [System.IO.Path]::Combine($mindrayDir, "PrintOutput")
         if ([System.IO.Directory]::Exists($printOutDir)) {
             $outFiles = Get-ChildItem -Path $printOutDir -Filter "*.out" -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime
@@ -345,30 +341,15 @@ function Export-MindrayDataToDrive {
                             $idx = $line.IndexOf("Str=")
                             $valStr = $line.Substring($idx + 4).Trim()
 
-                            if ($line.Contains("ID=00050")) {
-                                $sid = $valStr
-                            }
-                            elseif ($line.Contains("ID=00020")) {
-                                $pname = $valStr
-                            }
-                            elseif ($line.Contains("ID=03002")) {
-                                $dstr = $valStr
-                            }
+                            if ($line.Contains("ID=00050")) { $sid = $valStr }
+                            elseif ($line.Contains("ID=00020")) { $pname = $valStr }
+                            elseif ($line.Contains("ID=03002")) { $dstr = $valStr }
                             elseif ($line.Contains("ID=00018")) {
                                 $pts = $valStr.Split(' ')
-                                if ($pts.Length -eq 2) {
-                                    $dstr = $pts[0]
-                                    $tstr = $pts[1]
-                                } else {
-                                    $tstr = $valStr
-                                }
+                                if ($pts.Length -eq 2) { $dstr = $pts[0]; $tstr = $pts[1] } else { $tstr = $valStr }
                             }
-                            elseif ($line.Contains("ID=00090")) {
-                                $currName = $valStr
-                            }
-                            elseif ($line.Contains("ID=00092")) {
-                                $currVal = $valStr
-                            }
+                            elseif ($line.Contains("ID=00090")) { $currName = $valStr }
+                            elseif ($line.Contains("ID=00092")) { $currVal = $valStr }
                             elseif ($line.Contains("ID=00094")) {
                                 if ($currName -and $currVal) {
                                     if ($currName.Contains("Glu")) { $glu = $currVal }
@@ -401,7 +382,7 @@ function Export-MindrayDataToDrive {
         }
     }
 
-    # 4.3. РОЗУМНИЙ ІНКРЕМЕНТНИЙ ЗАПИС У CSV
+    # 6.3. РОЗУМНИЙ ІНКРЕМЕНТНИЙ ЗАПИС У CSV
     $todayStr = (Get-Date).ToString("yyyy-MM-dd")
     $csvPath = [System.IO.Path]::Combine($targetDir, "SampleInfo_Biochem_$todayStr.csv")
     
@@ -435,7 +416,6 @@ function Export-MindrayDataToDrive {
         } catch {}
     }
 
-    # Об'єднуємо наявні дані з флешки та нові дані з приладу
     $newCount = 0
     foreach ($k in $patientsMap.Keys) {
         $pNew = $patientsMap[$k]
@@ -443,7 +423,6 @@ function Export-MindrayDataToDrive {
             $existingMap[$k] = $pNew
             $newCount++
         } else {
-            # Оновлюємо, якщо з'явилися нові значення глюкози або ГГТ
             if ($pNew.Glu -and -not $existingMap[$k].Glu) { $existingMap[$k].Glu = $pNew.Glu; $newCount++ }
             if ($pNew.GGT -and -not $existingMap[$k].GGT) { $existingMap[$k].GGT = $pNew.GGT; $newCount++ }
         }
