@@ -2,9 +2,10 @@
 ==============================================================================
  MINDRAY BS-230 ROCK-SOLID STANDALONE EXPORT ENGINE (PowerShell / .NET Native)
 ==============================================================================
- Працює 100% АВТОНОМНО на будь-якій версії Windows БЕЗ стороннього ПЗ!
- Автоматично витягує дані напряму з бази даних MS SQL Server (BA80).
- Автоматично створює папку SCAN_00 на флешці, якщо її ще немає.
+ 1. 100% АВТОНОМНИЙ (PowerShell + .NET Native, без сторонніх залежностей)
+ 2. РОЗУМНИЙ ІНКРЕМЕНТНИЙ ЕКСПОРТ (дозаписує тільки нові/змінені аналізи)
+ 3. АУДІО ТА ГОЛОСОВЕ СПОВІЩЕННЯ (Windows System Chime + TTS Speech)
+ 4. АВТОМАТИЧНЕ СТВОРЕННЯ SCAN_00 на будь-якій USB-флешці
 ==============================================================================
 #>
 param(
@@ -25,7 +26,6 @@ function Write-Log($msg, $color = "White") {
 
 # 1. Пошук шляху встановлення Mindray
 function Get-MindrayInstallationPath {
-    # 1.1. Перевірка активного процесу WorkStation
     try {
         $proc = Get-Process WorkStation, BS230, BS240 -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($proc -and $proc.Path) {
@@ -36,7 +36,6 @@ function Get-MindrayInstallationPath {
         }
     } catch {}
 
-    # 1.2. Перевірка стандартних шляхів
     $candidates = @(
         "D:\Mindray\BS230\OperationSoft",
         "D:\mindray\Mindray\BS230\OperationSoft",
@@ -59,7 +58,6 @@ function Get-MindrayInstallationPath {
         }
     }
 
-    # 1.3. Швидкий пошук по готових дисках
     $drives = [System.IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady }
     foreach ($d in $drives) {
         try {
@@ -74,12 +72,11 @@ function Get-MindrayInstallationPath {
     return $candidates[0]
 }
 
-# 2. Надійне виявлення USB-флешок (Removable + Fixed USB + будь-які знімні диски)
+# 2. Надійне виявлення USB-флешок (Removable + Fixed USB + будь-які знімні носії)
 function Get-TargetUsbDrives {
     $targetRoots = @()
     $sysDrive = ($env:SystemDrive + "\").ToUpper()
 
-    # 2.1. Логічні диски з DriveType = 2 (Знімні флешки)
     try {
         $logicalRemovables = Get-CimInstance Win32_LogicalDisk -ErrorAction SilentlyContinue | Where-Object { $_.DriveType -eq 2 }
         foreach ($d in $logicalRemovables) {
@@ -90,7 +87,6 @@ function Get-TargetUsbDrives {
         }
     } catch {}
 
-    # 2.2. Фізичні диски на шині USB (флешки з типом Fixed/SCSI)
     try {
         $usbDisks = Get-CimInstance Win32_DiskDrive -ErrorAction SilentlyContinue | Where-Object { 
             $_.InterfaceType -eq "USB" -or 
@@ -113,7 +109,6 @@ function Get-TargetUsbDrives {
         }
     } catch {}
 
-    # 2.3. Резерв: Будь-який готовий диск крім C:, який містить папку SCAN_00
     try {
         $allDrives = [System.IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady -and $_.Name.ToUpper() -ne $sysDrive }
         foreach ($d in $allDrives) {
@@ -130,27 +125,40 @@ function Get-TargetUsbDrives {
     return $targetRoots
 }
 
-# 3. Сповіщення у треї Windows
-function Show-TrayNotification($title, $msg) {
+# 3. Аудіо, Голосове та Візуальне Сповіщення
+function Notify-ExportComplete($title, $msg, $spokenText = "Биохимия скопирована на флешку") {
+    # 3.1. Звуковий сигнал Windows Chime
+    try {
+        [System.Media.SystemSounds]::Asterisk.Play()
+    } catch {}
+
+    # 3.2. Голосове сповіщення Windows Speech TTS (фонове асинхронне)
+    try {
+        [void] [System.Reflection.Assembly]::LoadWithPartialName("System.Speech")
+        $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+        $synth.SpeakAsync($spokenText) | Out-Null
+    } catch {}
+
+    # 3.3. Спливаюче сповіщення Windows у правому нижньому кутку
     try {
         [void] [System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms")
         $notify = New-Object System.Windows.Forms.NotifyIcon
         $notify.Icon = [System.Drawing.SystemIcons]::Information
         $notify.Visible = $true
         $notify.ShowBalloonTip(6000, $title, $msg, [System.Windows.Forms.ToolTipIcon]::Info)
-        Start-Sleep -Seconds 3
+        Start-Sleep -Seconds 2
         $notify.Dispose()
     } catch {}
 }
 
-# 4. Збір та експорт даних пацієнтів (ПРЯМО З БАЗИ ДАНИХ MS SQL SERVER)
+# 4. Збір та Розумний Інкрементний Експорт Даних Пацієнтів
 function Export-MindrayDataToDrive {
     param(
         [Parameter(Mandatory=$true)][string]$driveRoot,
         [Parameter(Mandatory=$true)][string]$mindrayDir
     )
 
-    # 4.0. Автоматичне створення папки SCAN_00, якщо її ще немає на флешці
+    # 4.0. Автоматичне створення папки SCAN_00, якщо її ще немає
     $targetDir = [System.IO.Path]::Combine($driveRoot, "SCAN_00")
     if (-not [System.IO.Directory]::Exists($targetDir)) {
         try {
@@ -164,16 +172,16 @@ function Export-MindrayDataToDrive {
     $patientsMap = @{}
     $sqlSuccess = $false
 
-    # 4.1. Спроба підключення до MS SQL Server (Прямий запит до бази даних BA80)
-    $candidateInstances = @(".\BS240", "(local)\BS240", "localhost\BS240", "127.0.0.1\BS240", ".\BS230", "(local)\BS230", ".\SQLEXPRESS", "(local)", ".")
+    # 4.1. Спроба підключення до MS SQL Server (Прямий запит до бази BA80)
+    $candidateInstances = @(".\BS240", "(local)\BS240", ".\BS230", ".")
     $passwords = @("MINDRAY#BS800", "MINDRAY#BS200")
 
     foreach ($inst in $candidateInstances) {
         if ($sqlSuccess) { break }
         
-        # Спроба 1: SQL Authentication
+        # Спроба SQL Auth
         foreach ($pass in $passwords) {
-            $connStr = "Server=$inst;Database=BA80;User Id=sa;Password=$pass;Connect Timeout=2;"
+            $connStr = "Server=$inst;Database=BA80;User Id=sa;Password=$pass;Connect Timeout=1;"
             try {
                 $conn = New-Object System.Data.SqlClient.SqlConnection($connStr)
                 $conn.Open()
@@ -237,14 +245,14 @@ function Export-MindrayDataToDrive {
                     elseif ($chem.Contains("GT") -or $chem.Contains("GGT")) { $patientsMap[$key].GGT = $val }
                 }
                 $sqlSuccess = $true
-                Write-Log "🟢 Успішно підключено до бази даних MS SQL Server ($inst, BA80): зчитано $($patientsMap.Count) пацієнтів!" "Green"
+                Write-Log "🟢 Успішно підключено до бази даних MS SQL ($inst, BA80): зчитано $($patientsMap.Count) пацієнтів!" "Green"
                 break
             } catch {}
         }
 
-        # Спроба 2: Windows Authentication (якщо SQL auth вимкнено)
+        # Спроба Windows Auth
         if (-not $sqlSuccess) {
-            $connStrWin = "Server=$inst;Database=BA80;Integrated Security=True;Connect Timeout=2;"
+            $connStrWin = "Server=$inst;Database=BA80;Integrated Security=True;Connect Timeout=1;"
             try {
                 $conn = New-Object System.Data.SqlClient.SqlConnection($connStrWin)
                 $conn.Open()
@@ -308,13 +316,13 @@ function Export-MindrayDataToDrive {
                     elseif ($chem.Contains("GT") -or $chem.Contains("GGT")) { $patientsMap[$key].GGT = $val }
                 }
                 $sqlSuccess = $true
-                Write-Log "🟢 Успішно підключено до бази даних MS SQL Server ($inst, BA80, Windows Auth): зчитано $($patientsMap.Count) пацієнтів!" "Green"
+                Write-Log "🟢 Успішно підключено до бази даних MS SQL (Windows Auth, BA80): зчитано $($patientsMap.Count) пацієнтів!" "Green"
                 break
             } catch {}
         }
     }
 
-    # 4.2. Резервний парсинг PrintOutput *.out файлів (тільки якщо служба SQL вимкнена)
+    # 4.2. Резервний парсинг PrintOutput *.out файлів
     if (-not $sqlSuccess -or $patientsMap.Count -eq 0) {
         Write-Log "Служба SQL тимчасово недоступна, зчитування з локального буфера: $mindrayDir" "Yellow"
         $printOutDir = [System.IO.Path]::Combine($mindrayDir, "PrintOutput")
@@ -393,13 +401,57 @@ function Export-MindrayDataToDrive {
         }
     }
 
-    # 4.3. Запис у CSV
+    # 4.3. РОЗУМНИЙ ІНКРЕМЕНТНИЙ ЗАПИС У CSV
     $todayStr = (Get-Date).ToString("yyyy-MM-dd")
     $csvPath = [System.IO.Path]::Combine($targetDir, "SampleInfo_Biochem_$todayStr.csv")
     
+    $existingMap = @{}
+    if ([System.IO.File]::Exists($csvPath)) {
+        try {
+            $existingLines = [System.IO.File]::ReadAllLines($csvPath, [System.Text.Encoding]::UTF8)
+            for ($i = 1; $i -lt $existingLines.Length; $i++) {
+                $line = $existingLines[$i].Trim()
+                if ($line) {
+                    $parts = $line.Split(',')
+                    if ($parts.Length -ge 8) {
+                        $eSid = $parts[0].Trim('"')
+                        $eName = $parts[3].Trim('"')
+                        $eDate = $parts[4].Trim('"')
+                        $eTime = $parts[5].Trim('"')
+                        $eGlu = $parts[6].Trim('"')
+                        $eGgt = $parts[7].Trim('"')
+                        $eKey = "${eDate}_${eSid}_${eName}"
+                        $existingMap[$eKey] = [PSCustomObject]@{
+                            SampleID = $eSid
+                            PatientName = $eName
+                            Date = $eDate
+                            Time = $eTime
+                            Glu = $eGlu
+                            GGT = $eGgt
+                        }
+                    }
+                }
+            }
+        } catch {}
+    }
+
+    # Об'єднуємо наявні дані з флешки та нові дані з приладу
+    $newCount = 0
+    foreach ($k in $patientsMap.Keys) {
+        $pNew = $patientsMap[$k]
+        if (-not $existingMap.ContainsKey($k)) {
+            $existingMap[$k] = $pNew
+            $newCount++
+        } else {
+            # Оновлюємо, якщо з'явилися нові значення глюкози або ГГТ
+            if ($pNew.Glu -and -not $existingMap[$k].Glu) { $existingMap[$k].Glu = $pNew.Glu; $newCount++ }
+            if ($pNew.GGT -and -not $existingMap[$k].GGT) { $existingMap[$k].GGT = $pNew.GGT; $newCount++ }
+        }
+    }
+
     $csvLines = @()
     $csvLines += '"ID образца.","Фамилия","Имя","ФИО","Дата","Время","Glu","GGT","Тип_анализа"'
-    foreach ($p in $patientsMap.Values) {
+    foreach ($p in $existingMap.Values) {
         $fullName = $p.PatientName
         $parts = $fullName.Split(' ', 2)
         $lastName = if ($parts.Length -gt 0) { $parts[0] } else { "" }
@@ -409,12 +461,11 @@ function Export-MindrayDataToDrive {
         $csvLines += $line
     }
 
-    # Запис з UTF-8 BOM для бездоганного розпізнавання кирилиці
     $utf8WithBom = New-Object System.Text.UTF8Encoding($true)
     [System.IO.File]::WriteAllLines($csvPath, $csvLines, $utf8WithBom)
 
-    Write-Log "Успішно збережено $($patientsMap.Count) пацієнтів у файл: $csvPath" "Green"
-    return $patientsMap.Count
+    Write-Log "✅ Успішно збережено $($existingMap.Count) пацієнтів (нових: $newCount) у файл: $csvPath" "Green"
+    return [PSCustomObject]@{ Total = $existingMap.Count; New = $newCount }
 }
 
 # ==============================================================================
@@ -431,15 +482,16 @@ if ($Once) {
     if ($drives.Count -eq 0) {
         $testTarget = [System.IO.Path]::Combine($ScriptDir, "SCAN_00")
         Write-Log "[!] Зовнішніх USB-флешок не виявлено. Тестовий експорт виконується в ($testTarget)..." "Yellow"
-        $count = Export-MindrayDataToDrive -driveRoot $ScriptDir -mindrayDir $MindrayDir
-        Write-Log "Тестовий експорт виконано успішно: $count записів" "Green"
+        $res = Export-MindrayDataToDrive -driveRoot $ScriptDir -mindrayDir $MindrayDir
+        Write-Log "Тестовий експорт виконано успішно: $($res.Total) записів (нових: $($res.New))" "Green"
+        Notify-ExportComplete -title "Mindray BS-230 Exporter" -msg "Тестовий експорт: $($res.Total) записів." -spokenText "Тестовый экспорт биохимии завершен"
     } else {
         foreach ($d in $drives) {
             $destFolder = [System.IO.Path]::Combine($d, "SCAN_00")
             Write-Log "Виявлено диск: $d" "Green"
-            $count = Export-MindrayDataToDrive -driveRoot $d -mindrayDir $MindrayDir
-            Write-Log "Успішно експортовано $count записів на $destFolder" "Green"
-            Show-TrayNotification "Mindray BS-230 Exporter" "Експорт завершено: $count записів."
+            $res = Export-MindrayDataToDrive -driveRoot $d -mindrayDir $MindrayDir
+            Write-Log "Успішно експортовано $($res.Total) записів (нових: $($res.New)) на $destFolder" "Green"
+            Notify-ExportComplete -title "Mindray BS-230 Exporter" -msg "Експорт завершено ($destFolder): $($res.Total) записів." -spokenText "Биохимия скопирована на флешку"
         }
     }
     Write-Log "--- ДІАГНОСТИКУ ЗАВЕРШЕНО УСПІШНО ---" "Cyan"
@@ -463,11 +515,11 @@ while ($true) {
                 $processedDrives.Add($d) | Out-Null
                 
                 $destFolder = [System.IO.Path]::Combine($d, "SCAN_00")
-                Write-Log "Виявлено нову USB-флешку: $d" "Green"
+                Write-Log "🚀 Виявлено нову USB-флешку: $d" "Green"
                 
                 try {
-                    $count = Export-MindrayDataToDrive -driveRoot $d -mindrayDir $MindrayDir
-                    Show-TrayNotification "Mindray BS-230 Exporter" "Аналізи біохімії скопійовано на флешку: $count записів."
+                    $res = Export-MindrayDataToDrive -driveRoot $d -mindrayDir $MindrayDir
+                    Notify-ExportComplete -title "Mindray BS-230 Exporter" -msg "Аналізи біохімії скопійовано на флешку: $($res.Total) пацієнтів (нових: $($res.New))." -spokenText "Биохимия скопирована на флешку"
                 } catch {
                     Write-Log "Помилка експорту на $d : $_" "Red"
                 }
@@ -482,7 +534,7 @@ while ($true) {
             }
         }
         foreach ($r in $toRemove) {
-            Write-Log "USB-флешку відключено: $r" "DarkGray"
+            Write-Log "⏏️ USB-флешку відключено: $r" "DarkGray"
             $processedDrives.Remove($r) | Out-Null
         }
     } catch {
