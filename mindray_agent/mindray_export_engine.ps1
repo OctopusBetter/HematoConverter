@@ -143,7 +143,12 @@ function Show-TrayNotification($title, $msg) {
 }
 
 # 4. Збір та експорт даних пацієнтів
-function Export-MindrayDataToDrive($driveRoot, $mindrayDir) {
+function Export-MindrayDataToDrive {
+    param(
+        [Parameter(Mandatory=$true)][string]$driveRoot,
+        [Parameter(Mandatory=$true)][string]$mindrayDir
+    )
+
     $targetDir = [System.IO.Path]::Combine($driveRoot, "SCAN_00")
     if (-not [System.IO.Directory]::Exists($targetDir)) {
         [System.IO.Directory]::CreateDirectory($targetDir) | Out-Null
@@ -153,20 +158,13 @@ function Export-MindrayDataToDrive($driveRoot, $mindrayDir) {
     $sqlSuccess = $false
 
     # 4.1. Спроба підключення до MS SQL Server
-    $sqlService = Get-Service -Name "MSSQL`$BS240", "MSSQL`$BS230", "MSSQL`$SQLEXPRESS", "MSSQLSERVER" -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Running" } | Select-Object -First 1
-    
-    $candidateInstances = if ($sqlService) {
-        if ($sqlService.Name -match "MSSQL\$(.*)") { @(".\$($matches[1])", "(local)\$($matches[1])") } else { @(".", "(local)") }
-    } else {
-        @(".\BS240", ".\BS230")
-    }
-
+    $candidateInstances = @(".\BS240", "(local)\BS240", ".\BS230", ".")
     $passwords = @("MINDRAY#BS800", "MINDRAY#BS200")
 
     foreach ($inst in $candidateInstances) {
         if ($sqlSuccess) { break }
         foreach ($pass in $passwords) {
-            $connStr = "Server=$inst;Database=BA80;User Id=sa;Password=$pass;Connect Timeout=2;"
+            $connStr = "Server=$inst;Database=BA80;User Id=sa;Password=$pass;Connect Timeout=1;"
             try {
                 $conn = New-Object System.Data.SqlClient.SqlConnection($connStr)
                 $conn.Open()
@@ -236,7 +234,7 @@ function Export-MindrayDataToDrive($driveRoot, $mindrayDir) {
         }
     }
 
-    # 4.2. Резервний парсинг PrintOutput *.out файлів
+    # 4.2. Резервний парсинг PrintOutput *.out файлів (Безпечний строковий парсер без regex)
     if (-not $sqlSuccess -or $patientsMap.Count -eq 0) {
         Write-Log "SQL недоступний, миттєвий парсинг PrintOutput файлів з: $mindrayDir" "Yellow"
         $printOutDir = [System.IO.Path]::Combine($mindrayDir, "PrintOutput")
@@ -255,22 +253,41 @@ function Export-MindrayDataToDrive($driveRoot, $mindrayDir) {
                     $currVal = ""
 
                     foreach ($line in $lines) {
-                        if ($line -match "ID=00050.*Str=(.*)") { $sid = $matches[1].Trim() }
-                        elseif ($line -match "ID=00020.*Str=(.*)") { $pname = $matches[1].Trim() }
-                        elseif ($line -match "ID=03002.*Str=(.*)") { $dstr = $matches[1].Trim() }
-                        elseif ($line -match "ID=00018.*Str=(.*)") {
-                            $full = $matches[1].Trim()
-                            $pts = $full.Split(' ')
-                            if ($pts.Length -eq 2) { $dstr = $pts[0]; $tstr = $pts[1] } else { $tstr = $full }
-                        }
-                        elseif ($line -match "ID=00090.*Str=(.*)") { $currName = $matches[1].Trim() }
-                        elseif ($line -match "ID=00092.*Str=(.*)") { $currVal = $matches[1].Trim() }
-                        elseif ($line -match "ID=00094.*Str=(.*)") {
-                            if ($currName -and $currVal) {
-                                if ($currName.Contains("Glu")) { $glu = $currVal }
-                                elseif ($currName.Contains("GT") -or $currName.Contains("GGT")) { $ggt = $currVal }
-                                $currName = ""
-                                $currVal = ""
+                        if ($line.Contains("Str=")) {
+                            $idx = $line.IndexOf("Str=")
+                            $valStr = $line.Substring($idx + 4).Trim()
+
+                            if ($line.Contains("ID=00050")) {
+                                $sid = $valStr
+                            }
+                            elseif ($line.Contains("ID=00020")) {
+                                $pname = $valStr
+                            }
+                            elseif ($line.Contains("ID=03002")) {
+                                $dstr = $valStr
+                            }
+                            elseif ($line.Contains("ID=00018")) {
+                                $pts = $valStr.Split(' ')
+                                if ($pts.Length -eq 2) {
+                                    $dstr = $pts[0]
+                                    $tstr = $pts[1]
+                                } else {
+                                    $tstr = $valStr
+                                }
+                            }
+                            elseif ($line.Contains("ID=00090")) {
+                                $currName = $valStr
+                            }
+                            elseif ($line.Contains("ID=00092")) {
+                                $currVal = $valStr
+                            }
+                            elseif ($line.Contains("ID=00094")) {
+                                if ($currName -and $currVal) {
+                                    if ($currName.Contains("Glu")) { $glu = $currVal }
+                                    elseif ($currName.Contains("GT") -or $currName.Contains("GGT")) { $ggt = $currVal }
+                                    $currName = ""
+                                    $currVal = ""
+                                }
                             }
                         }
                     }
