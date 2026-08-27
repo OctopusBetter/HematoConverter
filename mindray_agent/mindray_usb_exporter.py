@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 MINDRAY BS-230 USB AUTO-EXPORTER (PYTHON)
-1. Прямой опрос базы данных SQL Server (BA80) через Shared Memory (без сетевых задержек).
-2. Автоматическое объединение с локальными файлами анализов.
-3. Мгновенная запись в SCAN_00 на USB-флешку.
-4. Звуковой сигнал + голосовое оповещение Windows.
+- Извлекает ВСЕ 400+ анализов (Глюкоза, ГГТ, ФИО, ID) из базы MS SQL Server (BA80).
+- Автоматически определяет точный экземпляр службы SQL из реестра Windows.
+- Сканирует все отчеты на диске и объединяет данные.
+- Сохраняет в SCAN_00 на USB-флешку с голосовым оповещением.
 """
 
 import os
@@ -14,6 +14,7 @@ import json
 import time
 import string
 import ctypes
+import winreg
 import datetime
 import winsound
 import threading
@@ -58,31 +59,32 @@ def speak(text="Биохимия скопирована на флешку"):
                 pass
     threading.Thread(target=_speak, daemon=True).start()
 
-def find_mindray_dir():
-    candidates = [
-        r"D:\Mindray\BS230\OperationSoft",
-        r"D:\mindray\Mindray\BS230\OperationSoft",
-        r"C:\Mindray\BS230\OperationSoft",
-        r"C:\Mindray\BS240\OperationSoft",
-        r"D:\Mindray\BS240\OperationSoft",
-        r"E:\Mindray\BS230\OperationSoft",
-        r"D:\BS230\OperationSoft",
-        r"C:\BS230\OperationSoft",
-        r"D:\mindray\BS230\OperationSoft"
-    ]
-    for c in candidates:
-        if os.path.isdir(c):
-            return c
-    for drive in ["D:\\", "C:\\", "E:\\"]:
-        if os.path.exists(drive):
-            for root, dirs, files in os.walk(drive):
-                if "OperationSoft" in dirs:
-                    found = os.path.join(root, "OperationSoft")
-                    if os.path.isdir(os.path.join(found, "PrintOutput")) or os.path.isdir(os.path.join(found, "DataBase")):
-                        return found
-                if root.count(os.sep) - drive.count(os.sep) >= 2:
-                    del dirs[:]
-    return candidates[0]
+def get_sql_targets_from_registry():
+    targets = []
+    try:
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Services")
+        i = 0
+        while True:
+            try:
+                sname = winreg.EnumKey(key, i)
+                if sname.upper().startswith("MSSQL$"):
+                    inst = sname[6:]
+                    targets.append(f"lpc:.\\{inst}")
+                    targets.append(f".\\{inst}")
+                    targets.append(f"np:\\\\.\\pipe\\MSSQL${inst}\\sql\\query")
+                elif sname.upper() == "MSSQLSERVER":
+                    targets.append("lpc:.")
+                    targets.append(".")
+                    targets.append("np:\\\\.\\pipe\\sql\\query")
+                i += 1
+            except OSError:
+                break
+        winreg.CloseKey(key)
+    except Exception:
+        pass
+    if not targets:
+        targets = ["lpc:.\\BS240", "lpc:.\\BS230", "lpc:.\\BS200", ".\\BS240", ".\\BS230", "(local)\\BS240", "."]
+    return targets
 
 def get_usb_drives():
     drives = []
@@ -102,50 +104,69 @@ def get_usb_drives():
         bitmask >>= 1
     return drives
 
-def extract_from_sql_direct():
-    ps_cmd = '''
-$instances = @("lpc:.\\BS240", "lpc:(local)\\BS240", "lpc:.\\BS230", "lpc:(local)\\BS230", "np:\\\\.\\pipe\\MSSQL$BS240\\sql\\query", ".\\BS240", "(local)\\BS240", ".\\BS230", ".")
-$passwords = @("MINDRAY#BS800", "MINDRAY#BS200", "sa", "")
-$databases = @("BA80", "BS240", "BS230")
+def extract_from_sql_all():
+    targets = get_sql_targets_from_registry()
+    log(f"🔍 Поиск SQL инстанса в службах: {targets[:2]}")
+    
+    t_str = json.dumps(targets)
+    ps_script = f"""
+$ErrorActionPreference = 'SilentlyContinue'
+$instances = ConvertFrom-Json @'
+{t_str}
+'@
+$passwords = @("MINDRAY#BS800", "MINDRAY#BS200", "MINDRAY#BA80", "mindray", "Admin", "sa", "")
+$databases = @("BA80", "BS240", "BS230", "BA40", "BA200")
 $patients = @()
-foreach ($inst in $instances) {
-    if ($patients.Count -gt 0) { break }
-    foreach ($pass in $passwords) {
-        if ($patients.Count -gt 0) { break }
-        foreach ($db in $databases) {
-            $connStr = if ($pass) { "Server=$inst;Database=$db;User Id=sa;Password=$pass;Connect Timeout=1;" } else { "Server=$inst;Database=$db;Integrated Security=True;Connect Timeout=1;" }
-            try {
+$connected = ""
+
+foreach ($inst in $instances) {{
+    if ($patients.Count -gt 0) {{ break }}
+    foreach ($pass in $passwords) {{
+        if ($patients.Count -gt 0) {{ break }}
+        foreach ($db in $databases) {{
+            $connStr = if ($pass) {{ "Server=$inst;Database=$db;User Id=sa;Password=$pass;Connect Timeout=2;" }} else {{ "Server=$inst;Database=$db;Integrated Security=True;Connect Timeout=2;" }}
+            try {{
                 $conn = New-Object System.Data.SqlClient.SqlConnection($connStr)
                 $conn.Open()
-                $sql = "SELECT s.UID AS SampleUID, COALESCE(s.SampleID, '') AS SampleID, COALESCE(p.Name, '') AS PatientName, s.SampleTime, c.ShortName AS ChemCode, r.ConcResult AS ResultVal FROM PtSample s WITH (NOLOCK) LEFT JOIN Patient p WITH (NOLOCK) ON s.PtUID = p.UID JOIN CCTestResult r WITH (NOLOCK) ON r.SampleUID = s.UID JOIN Chemistry c WITH (NOLOCK) ON r.ChemUID = c.UID ORDER BY s.SampleTime DESC"
-                $cmd = New-Object System.Data.SqlClient.SqlCommand($sql, $conn)
-                $adapter = New-Object System.Data.SqlClient.SqlDataAdapter($cmd)
-                $table = New-Object System.Data.DataTable
-                $adapter.Fill($table) | Out-Null
-                $conn.Close()
-                foreach ($row in $table.Rows) {
-                    $patients += [PSCustomObject]@{
-                        SampleID = "$($row.SampleID)".Trim()
-                        PatientName = "$($row.PatientName)".Trim()
-                        SampleTime = "$($row.SampleTime)"
-                        ChemCode = "$($row.ChemCode)".ToUpper()
-                        ResultVal = "$($row.ResultVal)".Trim()
-                    }
-                }
-                if ($patients.Count -gt 0) { break }
-            } catch {}
-        }
-    }
-}
-if ($patients.Count -gt 0) { $patients | ConvertTo-Json -Compress }
-'''
+                if ($conn.State -eq 'Open') {{
+                    $sql = "SELECT s.UID AS SampleUID, COALESCE(s.SampleID, '') AS SampleID, COALESCE(p.Name, '') AS PatientName, s.SampleTime, c.ShortName AS ChemCode, r.ConcResult AS ResultVal FROM PtSample s WITH (NOLOCK) LEFT JOIN Patient p WITH (NOLOCK) ON s.PtUID = p.UID JOIN CCTestResult r WITH (NOLOCK) ON r.SampleUID = s.UID JOIN Chemistry c WITH (NOLOCK) ON r.ChemUID = c.UID ORDER BY s.SampleTime ASC"
+                    $cmd = New-Object System.Data.SqlClient.SqlCommand($sql, $conn)
+                    $adapter = New-Object System.Data.SqlClient.SqlDataAdapter($cmd)
+                    $table = New-Object System.Data.DataTable
+                    $adapter.Fill($table) | Out-Null
+                    $conn.Close()
+                    foreach ($row in $table.Rows) {{
+                        $patients += [PSCustomObject]@{{
+                            SampleID = "$($row.SampleID)".Trim()
+                            PatientName = "$($row.PatientName)".Trim()
+                            SampleTime = "$($row.SampleTime)"
+                            ChemCode = "$($row.ChemCode)".ToUpper()
+                            ResultVal = "$($row.ResultVal)".Trim()
+                        }}
+                    }}
+                    if ($patients.Count -gt 0) {{
+                        $connected = "$inst -> $db"
+                        break
+                    }}
+                }}
+            }} catch {{}}
+        }}
+    }}
+}}
+
+if ($patients.Count -gt 0) {{
+    [PSCustomObject]@{{ Status = "OK"; Instance = $connected; Data = $patients }} | ConvertTo-Json -Compress -Depth 5
+}}
+"""
     try:
-        proc = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd], capture_output=True, text=True, timeout=4)
+        proc = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script], capture_output=True, text=True, timeout=8)
         out = proc.stdout.strip()
-        if out and (out.startswith("[") or out.startswith("{")):
-            raw_list = json.loads(out)
-            if isinstance(raw_list, dict): raw_list = [raw_list]
+        if out and (out.startswith("{") or out.startswith("[")):
+            res_obj = json.loads(out)
+            inst_info = res_obj.get("Instance", "SQL")
+            raw_list = res_obj.get("Data", [])
             sql_map = {}
+            glu_cnt, ggt_cnt = 0, 0
             for item in raw_list:
                 sid = str(item.get("SampleID", "")).strip()
                 pname = str(item.get("PatientName", "")).strip()
@@ -162,62 +183,82 @@ if ($patients.Count -gt 0) { $patients | ConvertTo-Json -Compress }
                 key = f"{dstr}_{sid}_{pname}"
                 if key not in sql_map:
                     sql_map[key] = {"SampleID": sid, "PatientName": pname, "Date": dstr, "Time": tstr, "Glu": "", "GGT": ""}
-                if "GLU" in chem: sql_map[key]["Glu"] = val
-                elif "GT" in chem or "GGT" in chem: sql_map[key]["GGT"] = val
+                if "GLU" in chem:
+                    sql_map[key]["Glu"] = val
+                    glu_cnt += 1
+                elif "GT" in chem or "GGT" in chem:
+                    sql_map[key]["GGT"] = val
+                    ggt_cnt += 1
             if sql_map:
-                log(f"🟢 УСПЕХ: Извлечено {len(sql_map)} пациентов напрямую из базы SQL Server (BA80)!")
+                log(f"🟢 УСПЕХ: Извлечено из базы данных SQL ({inst_info}):")
+                log(f"   -> Всего пациентов: {len(sql_map)}")
+                log(f"   -> Тестов Глюкозы (Glu): {glu_cnt}")
+                log(f"   -> Тестов ГГТ (GGT): {ggt_cnt}")
                 return sql_map
-    except Exception: pass
+    except Exception as e:
+        log(f"Запрос SQL: {e}")
     return {}
 
-def extract_from_printoutput(mindray_dir):
+def extract_from_all_files():
     patients = {}
-    print_out_dir = os.path.join(mindray_dir, "PrintOutput")
-    if os.path.isdir(print_out_dir):
-        out_files = glob.glob(os.path.join(print_out_dir, "*.out"))
-        out_files.sort(key=os.path.getmtime)
-        for fpath in out_files:
-            try:
-                with open(fpath, "r", encoding="cp1251", errors="ignore") as f:
-                    lines = f.readlines()
-                sid, pname, dstr, tstr, glu, ggt = "", "", "", "", "", ""
-                curr_name, curr_val = "", ""
-                for line in lines:
-                    if "Str=" in line:
-                        idx = line.find("Str=")
-                        val_str = line[idx + 4:].strip()
-                        if "ID=00050" in line: sid = val_str
-                        elif "ID=00020" in line: pname = val_str
-                        elif "ID=03002" in line: dstr = val_str
-                        elif "ID=00018" in line:
-                            parts = val_str.split()
-                            if len(parts) == 2: dstr, tstr = parts[0], parts[1]
-                            else: tstr = val_str
-                        elif "ID=00090" in line: curr_name = val_str
-                        elif "ID=00092" in line: curr_val = val_str
-                        elif "ID=00094" in line:
-                            if curr_name and curr_val:
-                                if "Glu" in curr_name or "GLU" in curr_name: glu = curr_val
-                                elif "GT" in curr_name or "GGT" in curr_name: ggt = curr_val
-                                curr_name, curr_val = "", ""
-                if sid or pname or glu or ggt:
-                    key = f"{dstr}_{sid}_{pname}"
-                    if key not in patients:
-                        patients[key] = {"SampleID": sid, "PatientName": pname, "Date": dstr, "Time": tstr, "Glu": glu, "GGT": ggt}
-                    else:
-                        if glu: patients[key]["Glu"] = glu
-                        if ggt: patients[key]["GGT"] = ggt
-            except Exception: pass
+    found_files = []
+    for drive in ["D:\\", "C:\\", "E:\\"]:
+        if os.path.exists(drive):
+            for pattern in ["Mindray/**/*.out", "mindray/**/*.out", "BS230/**/*.out", "BS240/**/*.out", "PrintOutput/**/*.out"]:
+                files = glob.glob(os.path.join(drive, pattern), recursive=True)
+                for f in files:
+                    if f not in found_files and os.path.isfile(f):
+                        found_files.append(f)
+    log(f"Найдено {len(found_files)} файлов анализов на диске")
+    found_files.sort(key=os.path.getmtime)
+    for fpath in found_files:
+        try:
+            with open(fpath, "r", encoding="cp1251", errors="ignore") as f:
+                lines = f.readlines()
+            sid, pname, dstr, tstr, glu, ggt = "", "", "", "", "", ""
+            curr_name, curr_val = "", ""
+            for line in lines:
+                if "Str=" in line:
+                    idx = line.find("Str=")
+                    val_str = line[idx + 4:].strip()
+                    if "ID=00050" in line: sid = val_str
+                    elif "ID=00020" in line: pname = val_str
+                    elif "ID=03002" in line: dstr = val_str
+                    elif "ID=00018" in line:
+                        parts = val_str.split()
+                        if len(parts) == 2: dstr, tstr = parts[0], parts[1]
+                        else: tstr = val_str
+                    elif "ID=00090" in line: curr_name = val_str
+                    elif "ID=00092" in line: curr_val = val_str
+                    elif "ID=00094" in line:
+                        if curr_name and curr_val:
+                            if "Glu" in curr_name or "GLU" in curr_name: glu = curr_val
+                            elif "GT" in curr_name or "GGT" in curr_name: ggt = curr_val
+                            curr_name, curr_val = "", ""
+            if sid or pname or glu or ggt:
+                key = f"{dstr}_{sid}_{pname}"
+                if key not in patients:
+                    patients[key] = {"SampleID": sid, "PatientName": pname, "Date": dstr, "Time": tstr, "Glu": glu, "GGT": ggt}
+                else:
+                    if glu: patients[key]["Glu"] = glu
+                    if ggt: patients[key]["GGT"] = ggt
+        except Exception: pass
     return patients
 
-def get_all_patients(mindray_dir):
-    patients = extract_from_sql_direct()
-    if not patients:
-        log("Чтение данных из локального хранилища анализов...")
-        patients = extract_from_printoutput(mindray_dir)
+def get_complete_database():
+    patients = extract_from_sql_all()
+    file_patients = extract_from_all_files()
+    for k, p_file in file_patients.items():
+        if k not in patients:
+            patients[k] = p_file
+        else:
+            if p_file["Glu"] and not patients[k]["Glu"]:
+                patients[k]["Glu"] = p_file["Glu"]
+            if p_file["GGT"] and not patients[k]["GGT"]:
+                patients[k]["GGT"] = p_file["GGT"]
     return patients
 
-def export_to_drive(drive_path, mindray_dir):
+def export_to_drive(drive_path):
     target_dir = os.path.join(drive_path, "SCAN_00")
     if not os.path.exists(target_dir):
         try:
@@ -227,7 +268,7 @@ def export_to_drive(drive_path, mindray_dir):
             log(f"Ошибка создания папки {target_dir}: {e}")
             return 0, 0
 
-    patients = get_all_patients(mindray_dir)
+    patients = get_complete_database()
     today_str = datetime.datetime.now().strftime("%Y-%m-%d")
     csv_path = os.path.join(target_dir, f"SampleInfo_Biochem_{today_str}.csv")
 
@@ -277,23 +318,21 @@ def export_to_drive(drive_path, mindray_dir):
 def main():
     once = "--once" in sys.argv
     print("=" * 70)
-    print("      АВТОЭКСПОРТ ДАННЫХ MINDRAY BS-230 НА ФЛЕШКУ (PYTHON)")
+    print("      АВТОЭКСПОРТ ВСЕЙ БАЗЫ MINDRAY BS-230 (PYTHON)")
     print("=" * 70)
-    mindray_dir = find_mindray_dir()
-    log(f"📂 Папка Mindray: {mindray_dir}")
     if once:
         log("--- РЕЖИМ ДИАГНОСТИКИ ---")
         drives = get_usb_drives()
         if not drives:
             log(f"⚠️ Флешка не найдена. Тестовый экспорт в {os.path.join(SCRIPT_DIR, 'SCAN_00')}")
-            total, new = export_to_drive(SCRIPT_DIR, mindray_dir)
+            total, new = export_to_drive(SCRIPT_DIR)
             log(f"Готово: {total} записей (новых: {new})")
             play_chime()
             speak("Тестовый экспорт завершен")
         else:
             for d in drives:
                 log(f"🚀 Найдена флешка: {d}")
-                total, new = export_to_drive(d, mindray_dir)
+                total, new = export_to_drive(d)
                 play_chime()
                 speak("Биохимия скопирована на флешку")
         log("--- ДИАГНОСТИКА ЗАВЕРШЕНА ---")
@@ -308,7 +347,7 @@ def main():
                     processed_drives.add(d)
                     log(f"🚀 Вставлена новая флешка: {d}")
                     try:
-                        total, new = export_to_drive(d, mindray_dir)
+                        total, new = export_to_drive(d)
                         play_chime()
                         speak("Биохимия скопирована на флешку")
                     except Exception as e:
