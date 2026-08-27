@@ -143,7 +143,7 @@ if ($connected) {
     patients = {}
     glu_cnt, ggt_cnt = 0, 0
     try:
-        proc = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script], capture_output=True, text=True, timeout=15)
+        proc = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "-"], input=ps_script, capture_output=True, text=True, timeout=15)
         lines = proc.stdout.splitlines()
         for line in lines:
             line = line.strip()
