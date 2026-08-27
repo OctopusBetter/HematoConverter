@@ -16,23 +16,12 @@ echo.
 echo ==============================================================================
 echo.
 
-:: 1. Проверяем команду python
-python --version >nul 2>&1
-if %errorlevel% equ 0 (
-    python "%~dp0mindray_usb_exporter.py"
+if exist "%~dp0python\python.exe" (
+    "%~dp0python\python.exe" "%~dp0mindray_usb_exporter.py"
     goto restart
 )
 
-:: 2. Проверяем команду py
-py --version >nul 2>&1
-if %errorlevel% equ 0 (
-    py "%~dp0mindray_usb_exporter.py"
-    goto restart
-)
-
-:: 3. Если Python не установлен — работает 100% автономный встроенный движок Windows
-echo [INFO] Запуск автономного движка Windows...
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0mindray_export_engine.ps1"
+python "%~dp0mindray_usb_exporter.py"
 
 :restart
 echo.

@@ -12,36 +12,28 @@ set "SCRIPT_DIR=%~dp0"
 set "BAT_FILE=%SCRIPT_DIR%run_exporter_window.bat"
 set "STARTUP_DIR=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
 
-:: 1. Проверка Python
-python --version >nul 2>&1
-if %errorlevel% neq 0 (
-    py --version >nul 2>&1
-    if %errorlevel% neq 0 (
-        echo [!] Python не обнаружен. Запускаем автоматическую установку...
-        call "%SCRIPT_DIR%install_python.bat"
-    )
-)
-
-echo.
-echo [1/3] Остановка старых фоновых окон...
-powershell -NoProfile -Command "Get-Process python, pythonw, powershell, wscript, cmd -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -match 'MINDRAY' -or $_.CommandLine -match 'mindray' } | Stop-Process -Force -ErrorAction SilentlyContinue" >nul 2>&1
-echo   -^> Предыдущие процессы остановлены.
+echo [1/3] Принудительная остановка старых процессов...
+taskkill /F /IM powershell.exe /T >nul 2>&1
+taskkill /F /IM wscript.exe /T >nul 2>&1
+taskkill /F /IM python.exe /T >nul 2>&1
+taskkill /F /IM pythonw.exe /T >nul 2>&1
 
 echo.
 echo [2/3] Добавление в автозапуск Windows...
 powershell -NoProfile -Command "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut('%STARTUP_DIR%\Mindray_BS230_AutoExport.lnk'); $s.TargetPath = '%BAT_FILE%'; $s.WorkingDirectory = '%SCRIPT_DIR%'; $s.Save()"
-echo   -^> Ярлык автозапуска создан:
+echo   -^> Ярлык создан в Автозагрузке:
 echo      %STARTUP_DIR%\Mindray_BS230_AutoExport.lnk
 
 echo.
-echo [3/3] Запуск мониторинга...
+echo [3/3] Запуск монитора автоэкспорта...
 start "" "%BAT_FILE%"
 
 echo.
 echo ==============================================================================
-echo      УСТАНОВКА УСПЕШНО ЗАВЕРШЕНА!
+echo      УСТАНОВКА ПОЛНОСТЬЮ ЗАВЕРШЕНА!
 echo ==============================================================================
+echo  - Встроенный автономный Python готов к работе.
 echo  - Открылось рабочее окно монітора.
-echo  - Вставьте флешку — данные запишутся в папку SCAN_00 автоматически!
+echo  - Вставляйте любую флешку — файлы будут писаться в SCAN_00!
 echo.
 pause
