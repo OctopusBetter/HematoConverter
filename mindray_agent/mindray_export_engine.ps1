@@ -1,4 +1,4 @@
-<#
+﻿<#
 ==============================================================================
  MINDRAY BS-230 ROCK-SOLID STANDALONE EXPORT ENGINE (PowerShell / .NET Native)
 ==============================================================================
@@ -11,7 +11,7 @@ param(
 )
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$LogFile = Join-Path $ScriptDir "agent_log.txt"
+$LogFile = [System.IO.Path]::Combine($ScriptDir, "agent_log.txt")
 
 function Write-Log($msg, $color = "White") {
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -29,7 +29,7 @@ function Get-MindrayInstallationPath {
         $proc = Get-Process WorkStation, BS230, BS240 -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($proc -and $proc.Path) {
             $pDir = Split-Path $proc.Path -Parent
-            if ((Test-Path (Join-Path $pDir "PrintOutput")) -or (Test-Path (Join-Path $pDir "DataBase"))) {
+            if ([System.IO.Directory]::Exists($pDir)) {
                 return $pDir
             }
         }
@@ -49,17 +49,22 @@ function Get-MindrayInstallationPath {
         "D:\mindray\BS230\OperationSoft"
     )
     foreach ($p in $candidates) {
-        if ((Test-Path (Join-Path $p "PrintOutput")) -or (Test-Path (Join-Path $p "DataBase"))) {
-            return $p
+        if ([System.IO.Directory]::Exists($p)) {
+            $pOut = [System.IO.Path]::Combine($p, "PrintOutput")
+            $pDb = [System.IO.Path]::Combine($p, "DataBase")
+            if ([System.IO.Directory]::Exists($pOut) -or [System.IO.Directory]::Exists($pDb)) {
+                return $p
+            }
         }
     }
 
-    # 1.3. Швидкий пошук по дисках C:, D:, E:
-    $drives = [System.IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady -and $_.DriveType -eq [System.IO.DriveType]::Fixed }
+    # 1.3. Швидкий пошук по готових дисках
+    $drives = [System.IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady }
     foreach ($d in $drives) {
         try {
-            $found = Get-ChildItem -Path $d.RootDirectory.FullName -Filter "OperationSoft" -Directory -Recurse -Depth 3 -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($found) {
+            $r = $d.RootDirectory.FullName
+            $found = Get-ChildItem -Path $r -Filter "OperationSoft" -Directory -Recurse -Depth 3 -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found -and [System.IO.Directory]::Exists($found.FullName)) {
                 return $found.FullName
             }
         } catch {}
@@ -113,7 +118,8 @@ function Get-TargetUsbDrives {
         foreach ($d in $allDrives) {
             $r = $d.RootDirectory.FullName.ToUpper()
             if ($targetRoots -notcontains $r) {
-                if (Test-Path (Join-Path $r "SCAN_00")) {
+                $scanDir = [System.IO.Path]::Combine($r, "SCAN_00")
+                if ([System.IO.Directory]::Exists($scanDir)) {
                     $targetRoots += $r
                 }
             }
@@ -138,15 +144,15 @@ function Show-TrayNotification($title, $msg) {
 
 # 4. Збір та експорт даних пацієнтів
 function Export-MindrayDataToDrive($driveRoot, $mindrayDir) {
-    $targetDir = Join-Path $driveRoot "SCAN_00"
-    if (-not (Test-Path $targetDir)) {
-        New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+    $targetDir = [System.IO.Path]::Combine($driveRoot, "SCAN_00")
+    if (-not [System.IO.Directory]::Exists($targetDir)) {
+        [System.IO.Directory]::CreateDirectory($targetDir) | Out-Null
     }
 
     $patientsMap = @{}
     $sqlSuccess = $false
 
-    # 4.1. Спроба підключення до MS SQL Server (швидка перевірка служби)
+    # 4.1. Спроба підключення до MS SQL Server
     $sqlService = Get-Service -Name "MSSQL`$BS240", "MSSQL`$BS230", "MSSQL`$SQLEXPRESS", "MSSQLSERVER" -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Running" } | Select-Object -First 1
     
     $candidateInstances = if ($sqlService) {
@@ -233,63 +239,66 @@ function Export-MindrayDataToDrive($driveRoot, $mindrayDir) {
     # 4.2. Резервний парсинг PrintOutput *.out файлів
     if (-not $sqlSuccess -or $patientsMap.Count -eq 0) {
         Write-Log "SQL недоступний, миттєвий парсинг PrintOutput файлів з: $mindrayDir" "Yellow"
-        $outFiles = Get-ChildItem (Join-Path $mindrayDir "PrintOutput\*.out") -ErrorAction SilentlyContinue | Sort-Object LastWriteTime
-        foreach ($f in $outFiles) {
-            try {
-                $lines = Get-Content $f.FullName -Encoding Default
-                $sid = ""
-                $pname = ""
-                $dstr = ""
-                $tstr = ""
-                $glu = ""
-                $ggt = ""
-                $currName = ""
-                $currVal = ""
+        $printOutDir = [System.IO.Path]::Combine($mindrayDir, "PrintOutput")
+        if ([System.IO.Directory]::Exists($printOutDir)) {
+            $outFiles = Get-ChildItem -Path $printOutDir -Filter "*.out" -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime
+            foreach ($f in $outFiles) {
+                try {
+                    $lines = Get-Content $f.FullName -Encoding Default -ErrorAction SilentlyContinue
+                    $sid = ""
+                    $pname = ""
+                    $dstr = ""
+                    $tstr = ""
+                    $glu = ""
+                    $ggt = ""
+                    $currName = ""
+                    $currVal = ""
 
-                foreach ($line in $lines) {
-                    if ($line -match "ID=00050.*Str=(.*)") { $sid = $matches[1].Trim() }
-                    elseif ($line -match "ID=00020.*Str=(.*)") { $pname = $matches[1].Trim() }
-                    elseif ($line -match "ID=03002.*Str=(.*)") { $dstr = $matches[1].Trim() }
-                    elseif ($line -match "ID=00018.*Str=(.*)") {
-                        $full = $matches[1].Trim()
-                        $pts = $full.Split(' ')
-                        if ($pts.Length -eq 2) { $dstr = $pts[0]; $tstr = $pts[1] } else { $tstr = $full }
-                    }
-                    elseif ($line -match "ID=00090.*Str=(.*)") { $currName = $matches[1].Trim() }
-                    elseif ($line -match "ID=00092.*Str=(.*)") { $currVal = $matches[1].Trim() }
-                    elseif ($line -match "ID=00094.*Str=(.*)") {
-                        if ($currName -and $currVal) {
-                            if ($currName.Contains("Glu")) { $glu = $currVal }
-                            elseif ($currName.Contains("GT") -or $currName.Contains("GGT")) { $ggt = $currVal }
-                            $currName = ""
-                            $currVal = ""
+                    foreach ($line in $lines) {
+                        if ($line -match "ID=00050.*Str=(.*)") { $sid = $matches[1].Trim() }
+                        elseif ($line -match "ID=00020.*Str=(.*)") { $pname = $matches[1].Trim() }
+                        elseif ($line -match "ID=03002.*Str=(.*)") { $dstr = $matches[1].Trim() }
+                        elseif ($line -match "ID=00018.*Str=(.*)") {
+                            $full = $matches[1].Trim()
+                            $pts = $full.Split(' ')
+                            if ($pts.Length -eq 2) { $dstr = $pts[0]; $tstr = $pts[1] } else { $tstr = $full }
+                        }
+                        elseif ($line -match "ID=00090.*Str=(.*)") { $currName = $matches[1].Trim() }
+                        elseif ($line -match "ID=00092.*Str=(.*)") { $currVal = $matches[1].Trim() }
+                        elseif ($line -match "ID=00094.*Str=(.*)") {
+                            if ($currName -and $currVal) {
+                                if ($currName.Contains("Glu")) { $glu = $currVal }
+                                elseif ($currName.Contains("GT") -or $currName.Contains("GGT")) { $ggt = $currVal }
+                                $currName = ""
+                                $currVal = ""
+                            }
                         }
                     }
-                }
 
-                if ($sid -or $pname -or $glu -or $ggt) {
-                    $key = "${dstr}_${sid}_${pname}"
-                    if (-not $patientsMap.ContainsKey($key)) {
-                        $patientsMap[$key] = [PSCustomObject]@{
-                            SampleID = $sid
-                            PatientName = $pname
-                            Date = $dstr
-                            Time = $tstr
-                            Glu = $glu
-                            GGT = $ggt
+                    if ($sid -or $pname -or $glu -or $ggt) {
+                        $key = "${dstr}_${sid}_${pname}"
+                        if (-not $patientsMap.ContainsKey($key)) {
+                            $patientsMap[$key] = [PSCustomObject]@{
+                                SampleID = $sid
+                                PatientName = $pname
+                                Date = $dstr
+                                Time = $tstr
+                                Glu = $glu
+                                GGT = $ggt
+                            }
+                        } else {
+                            if ($glu) { $patientsMap[$key].Glu = $glu }
+                            if ($ggt) { $patientsMap[$key].GGT = $ggt }
                         }
-                    } else {
-                        if ($glu) { $patientsMap[$key].Glu = $glu }
-                        if ($ggt) { $patientsMap[$key].GGT = $ggt }
                     }
-                }
-            } catch {}
+                } catch {}
+            }
         }
     }
 
     # 4.3. Запис у CSV
     $todayStr = (Get-Date).ToString("yyyy-MM-dd")
-    $csvPath = Join-Path $targetDir "SampleInfo_Biochem_$todayStr.csv"
+    $csvPath = [System.IO.Path]::Combine($targetDir, "SampleInfo_Biochem_$todayStr.csv")
     
     $csvLines = @()
     $csvLines += '"ID образца.","Фамилия","Имя","ФИО","Дата","Время","Glu","GGT","Тип_анализа"'
@@ -323,15 +332,17 @@ if ($Once) {
     Write-Log "--- РЕЖИМ ПРЯМОГО ДІАГНОСТИЧНОГО ТЕСТУ ---" "Yellow"
     $drives = Get-TargetUsbDrives
     if ($drives.Count -eq 0) {
-        Write-Log "[!] Зовнішніх USB-флешок не виявлено. Тестовий експорт виконується в ($ScriptDir\SCAN_00)..." "Yellow"
+        $testTarget = [System.IO.Path]::Combine($ScriptDir, "SCAN_00")
+        Write-Log "[!] Зовнішніх USB-флешок не виявлено. Тестовий експорт виконується в ($testTarget)..." "Yellow"
         $count = Export-MindrayDataToDrive -driveRoot $ScriptDir -mindrayDir $MindrayDir
         Write-Log "Тестовий експорт виконано успішно: $count записів" "Green"
     } else {
         foreach ($d in $drives) {
+            $destFolder = [System.IO.Path]::Combine($d, "SCAN_00")
             Write-Log "Виявлено диск: $d" "Green"
             $count = Export-MindrayDataToDrive -driveRoot $d -mindrayDir $MindrayDir
-            Write-Log "Успішно експортовано $count записів на $d\SCAN_00" "Green"
-            Show-TrayNotification "Mindray BS-230 Exporter" "✅ Експорт завершено ($d\SCAN_00): $count записів."
+            Write-Log "Успішно експортовано $count записів на $destFolder" "Green"
+            Show-TrayNotification "Mindray BS-230 Exporter" "Експорт завершено: $count записів."
         }
     }
     Write-Log "--- ДІАГНОСТИКУ ЗАВЕРШЕНО УСПІШНО ---" "Cyan"
@@ -352,9 +363,10 @@ while ($true) {
         
         foreach ($d in $drives) {
             if (-not $processedDrives.Contains($d)) {
+                $destFolder = [System.IO.Path]::Combine($d, "SCAN_00")
                 Write-Log "Виявлено нову USB-флешку: $d" "Green"
                 $count = Export-MindrayDataToDrive -driveRoot $d -mindrayDir $MindrayDir
-                Show-TrayNotification "Mindray BS-230 Exporter" "✅ Аналізи біохімії скопійовано на флешку ($d\SCAN_00): $count записів."
+                Show-TrayNotification "Mindray BS-230 Exporter" "Аналізи біохімії скопійовано на флешку: $count записів."
                 $processedDrives.Add($d) | Out-Null
             }
         }
