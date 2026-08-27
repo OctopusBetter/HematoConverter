@@ -1,20 +1,12 @@
 @echo off
 chcp 65001 >nul
-title ДІАГНОСТИКА ТА ПЕРЕВІРКА ЕКСПОРТУ MINDRAY BS-230
+title ТЕСТ ЭКСПОРТА MINDRAY BS-230
 color 0e
 
-echo ==============================================================================
-echo       ДІАГНОСТИКА ТА ТЕСТОВИЙ ЕКСПОРТ ДАНИХ MINDRAY BS-230
-echo ==============================================================================
-echo.
-echo Запуск прямого діагностичного тесту...
-echo.
+python "%~dp0mindray_usb_exporter.py" --once
+if errorlevel 1 (
+    py "%~dp0mindray_usb_exporter.py" --once
+)
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0mindray_export_engine.ps1" -Once
-
-echo.
-echo ==============================================================================
-echo Лог роботи збережено у: %~dp0agent_log.txt
-echo ==============================================================================
 echo.
 pause

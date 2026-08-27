@@ -1,24 +1,21 @@
 @echo off
 chcp 65001 >nul
-title АВТОЕКСПОРТ MINDRAY BS-230 (SCAN_00)
+title АВТОЭКСПОРТ MINDRAY BS-230 (SCAN_00)
 color 0b
 
 :start
 cls
 echo ==============================================================================
-echo       СЛУЖБА АВТОМАТИЧНОГО ЕКСПОРТУ ДАНИХ MINDRAY BS-230
-echo ==============================================================================
-echo.
-echo  - Цей монітор працює постійно та очікує підключення будь-якої USB-флешки.
-echo  - При вставленні флешки дані автоматично записуються у папку SCAN_00.
-echo  - Ви можете ЗГОРНУТИ це вікно, але не закривайте його під час роботи.
-echo.
+echo       СЛУЖБА АВТОМАТИЧЕСКОГО ЭКСПОРТА ДАННЫХ MINDRAY BS-230 (PYTHON)
 echo ==============================================================================
 echo.
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0mindray_export_engine.ps1"
+python "%~dp0mindray_usb_exporter.py"
+if errorlevel 1 (
+    py "%~dp0mindray_usb_exporter.py"
+)
 
 echo.
-echo [УВАГА] Моніторинг було перервано. Перезапуск через 5 секунд...
+echo [ВНИМАНИЕ] Перезапуск через 5 секунд...
 timeout /t 5
 goto start
