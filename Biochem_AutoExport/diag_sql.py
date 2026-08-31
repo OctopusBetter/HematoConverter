@@ -6,10 +6,12 @@ import os
 import sys
 import winreg
 import subprocess
+import base64
 
 if sys.platform == "win32":
     try:
-        os.system("chcp 65001 >nul")
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
 
@@ -55,11 +57,13 @@ def run_diagnostics():
     print("3. Проверка подключения к базе данных...")
     print("-" * 75)
     inst_array = "@(" + ", ".join([f'"{i}"' for i in instances]) + ")"
-    ps_diag = '''
-$instances = ''' + inst_array + '''
+    ps_diag = """
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$instances = """ + inst_array + """
 $passwords = @("MINDRAY#BS800", "MINDRAY#BS200", "MINDRAY#BA80", "MINDRAY#BS240", "mindray", "Admin", "sa", "")
 $databases = @("BA80", "BS240", "BS230", "BA40", "BA200", "master")
 $found = $false
+
 foreach ($inst in $instances) {
     if ($found) { break }
     foreach ($db in $databases) {
@@ -74,62 +78,59 @@ foreach ($inst in $instances) {
                 $sampleCount = $cmd.ExecuteScalar()
                 $cmd2 = New-Object System.Data.SqlClient.SqlCommand("SELECT COUNT(*) FROM CCTestResult", $conn)
                 $resultCount = $cmd2.ExecuteScalar()
-                $cmd3 = New-Object System.Data.SqlClient.SqlCommand("SELECT SUM(CASE WHEN c.ShortName LIKE '%GLU%' THEN 1 ELSE 0 END) AS GluCount, SUM(CASE WHEN c.ShortName LIKE '%GT%' THEN 1 ELSE 0 END) AS GgtCount FROM CCTestResult r JOIN Chemistry c ON r.ChemUID = c.UID", $conn)
-                $reader = $cmd3.ExecuteReader()
-                $gluCnt = 0; $ggtCnt = 0
-                if ($reader.Read()) {
-                    $gluCnt = $reader["GluCount"]
-                    $ggtCnt = $reader["GgtCount"]
+                
+                $sqlTop = @"
+SELECT TOP 5 
+    s.UID AS SampleUID, 
+    COALESCE(s.SampID, '') AS SampleID, 
+    COALESCE(p.Name, '') AS PatientName, 
+    COALESCE(s.TestDate, s.RunTime, s.CollectDate) AS SampleTime, 
+    c.ChemName AS ChemCode, 
+    r.RawResult AS ResultVal 
+FROM PtSample s WITH (NOLOCK) 
+LEFT JOIN Patient p WITH (NOLOCK) ON s.PtUID = p.UID 
+JOIN CCTest t WITH (NOLOCK) ON t.SAMPUID = s.UID 
+JOIN Chemistry c WITH (NOLOCK) ON t.ChemUID = c.UID 
+JOIN CCTestResult r WITH (NOLOCK) ON (r.UID = t.ResultUID OR r.TestUID = t.UID) 
+ORDER BY s.UID DESC
+"@
+                $cmdTop = New-Object System.Data.SqlClient.SqlCommand($sqlTop, $conn)
+                $reader = $cmdTop.ExecuteReader()
+                $samples = @()
+                while ($reader.Read()) {
+                    $sid = $reader["SampleID"].ToString()
+                    $pname = $reader["PatientName"].ToString()
+                    $stime = $reader["SampleTime"].ToString()
+                    $chem = $reader["ChemCode"].ToString()
+                    $val = [math]::Round([double]$reader["ResultVal"], 2).ToString()
+                    $samples += "      - ID: $($sid) | ФИО: $($pname) | Время: $($stime) | $($chem): $($val)"
                 }
                 $reader.Close()
-                $sqlTop = "SELECT TOP 5 COALESCE(s.SampleID, '') AS SampleID, COALESCE(p.Name, '') AS PatientName, s.SampleTime, c.ShortName AS ChemCode, r.ConcResult AS ResultVal FROM PtSample s WITH (NOLOCK) LEFT JOIN Patient p WITH (NOLOCK) ON s.PtUID = p.UID JOIN CCTestResult r WITH (NOLOCK) ON r.SampleUID = s.UID JOIN Chemistry c WITH (NOLOCK) ON r.ChemUID = c.UID ORDER BY s.SampleTime DESC"
-                $cmdTop = New-Object System.Data.SqlClient.SqlCommand($sqlTop, $conn)
-                $adapter = New-Object System.Data.SqlClient.SqlDataAdapter($cmdTop)
-                $dt = New-Object System.Data.DataTable
-                $adapter.Fill($dt) | Out-Null
                 $conn.Close()
+                
                 Write-Host "   -------------------------------------------------------------"
                 Write-Host "   [РЕЗУЛЬТАТЫ ДИАГНОСТИКИ БАЗЫ ДАННЫХ]:"
-                Write-Host "      - Всего образцов (PtSample): $sampleCount" -ForegroundColor Cyan
-                Write-Host "      - Всего тестов (CCTestResult): $resultCount" -ForegroundColor Cyan
-                Write-Host "      - Всего тестов Глюкозы (Glu): $gluCnt" -ForegroundColor Yellow
-                Write-Host "      - Всего тестов ГГТ (GGT): $ggtCnt" -ForegroundColor Yellow
+                Write-Host "      - Всего образцов в базе (PtSample): $sampleCount" -ForegroundColor Cyan
+                Write-Host "      - Всего результатов анализов (CCTestResult): $resultCount" -ForegroundColor Cyan
                 Write-Host "   -------------------------------------------------------------"
                 Write-Host "   [ПОСЛЕДНИЕ АНАЛИЗЫ В БАЗЕ]:"
-                foreach ($row in $dt.Rows) {
-                    Write-Host "      - ID: $($row.SampleID) | ФИО: $($row.PatientName) | Время: $($row.SampleTime) | $($row.ChemCode): $($row.ResultVal)"
+                foreach ($s in $samples) {
+                    Write-Host $s
                 }
                 Write-Host "   -------------------------------------------------------------"
                 $found = $true
                 break
             }
         } catch {}
-        if (-not $found) {
-            foreach ($pass in $passwords) {
-                $connStr = "Server=$inst;Database=$db;User Id=sa;Password=$pass;Connect Timeout=1;"
-                try {
-                    $conn = New-Object System.Data.SqlClient.SqlConnection($connStr)
-                    $conn.Open()
-                    if ($conn.State -eq "Open") {
-                        Write-Host "   [+] ПОДКЛЮЧЕНО: $inst -> База: $db (Пароль sa: $pass)" -ForegroundColor Green
-                        $cmd = New-Object System.Data.SqlClient.SqlCommand("SELECT COUNT(*) FROM PtSample", $conn)
-                        $sampleCount = $cmd.ExecuteScalar()
-                        $conn.Close()
-                        Write-Host "   [ДАННЫЕ]: Найдено образцов: $sampleCount" -ForegroundColor Cyan
-                        $found = $true
-                        break
-                    }
-                } catch {}
-            }
-        }
     }
 }
 if (-not $found) {
     Write-Host "   [!] Не удалось подключиться к базе стандартными способами." -ForegroundColor Red
 }
-'''
+"""
     try:
-        subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_diag])
+        enc = base64.b64encode(ps_diag.encode("utf-16le")).decode("ascii")
+        subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", enc])
     except Exception as e:
         print("Ошибка диагностики:", e)
     print()

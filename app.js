@@ -58,7 +58,20 @@
         'P-LCC': { ukrName: 'Кількість великих тромбоцитів', code: 'P-LCC', unit: '10⁹/л', min: 30, max: 90 },
         'CRP': { ukrName: 'С-реактивний білок', code: 'CRP', unit: 'мг/л', min: 0.0, max: 5.0 },
         'Glu': { ukrName: 'Глюкоза (сироватка)', code: 'Glu', unit: 'ммоль/л', min: 4.10, max: 5.90 },
-        'GGT': { ukrName: 'Гамма-глутамілтрансфераза (ГГТ)', code: 'GGT', unit: 'Од/л', min: 10.0, max: 50.0 }
+        'GGT': { ukrName: 'Гамма-глутамілтрансфераза (ГГТ)', code: 'GGT', unit: 'Од/л', min: 10.0, max: 50.0 },
+        'Mg': { ukrName: 'Магній (сироватка)', code: 'Mg', unit: 'ммоль/л', min: 0.66, max: 1.07 },
+        'TBil': { ukrName: 'Білірубін загальний', code: 'T-Bil', unit: 'мкмоль/л', min: 3.4, max: 20.5 },
+        'T-Bil-V': { ukrName: 'Білірубін загальний', code: 'T-Bil', unit: 'мкмоль/л', min: 3.4, max: 20.5 },
+        'DBil': { ukrName: 'Білірубін прямий', code: 'D-Bil', unit: 'мкмоль/л', min: 0.0, max: 8.6 },
+        'D-Bil-V': { ukrName: 'Білірубін прямий', code: 'D-Bil', unit: 'мкмоль/л', min: 0.0, max: 8.6 },
+        'ALT': { ukrName: 'Аланінамінотрансфераза (АЛТ)', code: 'ALT', unit: 'Од/л', min: 0.0, max: 41.0 },
+        'AST': { ukrName: 'Аспартатамінотрансфераза (АСТ)', code: 'AST', unit: 'Од/л', min: 0.0, max: 40.0 },
+        'ALB': { ukrName: 'Альбумін', code: 'ALB', unit: 'г/л', min: 35.0, max: 52.0 },
+        'TP': { ukrName: 'Загальний білок', code: 'TP', unit: 'г/л', min: 64.0, max: 83.0 },
+        'UREA': { ukrName: 'Сечовина', code: 'UREA', unit: 'ммоль/л', min: 2.5, max: 8.3 },
+        'CREA': { ukrName: 'Креатинін', code: 'CREA', unit: 'мкмоль/л', min: 62.0, max: 115.0 },
+        'CHOL': { ukrName: 'Холестерин загальний', code: 'CHOL', unit: 'ммоль/л', min: 3.0, max: 5.2 },
+        'TG': { ukrName: 'Тригліцериди', code: 'TG', unit: 'ммоль/л', min: 0.4, max: 1.7 }
     };
 
     /* ==========================================================================
@@ -152,16 +165,15 @@
         });
     }
 
-    // Format Date & Time: 05-08-2026 18:12:57 -> { dateStr: "05.08.2026", timeStr: "18:12:57" }
+    // Format Date & Time: 05-08-2026 18:12:57 or 05.08.2026 18:12:57 -> { dateStr: "05.08.2026", timeStr: "18:12:57" }
     function splitUkrainianDateTime(rawTimeStr) {
         if (!rawTimeStr) return { dateStr: '—', timeStr: '—' };
-        const match = rawTimeStr.match(/(\d{2})-(\d{2})-(\d{4})\s+(\d{2}:\d{2}:\d{2})/);
+        const match = rawTimeStr.match(/(\d{2})[.-](\d{2})[.-](\d{4})(?:\s+(\d{2}:\d{2}(?::\d{2})?))?/);
         if (match) {
-            return { dateStr: `${match[1]}.${match[2]}.${match[3]}`, timeStr: match[4] };
-        }
-        const dateOnlyMatch = rawTimeStr.match(/(\d{2})-(\d{2})-(\d{4})/);
-        if (dateOnlyMatch) {
-            return { dateStr: `${dateOnlyMatch[1]}.${dateOnlyMatch[2]}.${dateOnlyMatch[3]}`, timeStr: '—' };
+            return { 
+                dateStr: `${match[1]}.${match[2]}.${match[3]}`, 
+                timeStr: match[4] || '—' 
+            };
         }
         return { dateStr: rawTimeStr, timeStr: '—' };
     }
@@ -274,8 +286,11 @@
             if (candidateMatches.length === 1) {
                 // Auto-match with hematology patient
                 const target = candidateMatches[0];
-                if (b['Glu']) target['Glu'] = b['Glu'];
-                if (b['GGT']) target['GGT'] = b['GGT'];
+                Object.keys(b).forEach(k => {
+                    if (!k.startsWith('_') && b[k] !== undefined && b[k] !== '') {
+                        target[k] = b[k];
+                    }
+                });
                 target._hasBiochem = true;
                 target._biochemSource = b;
                 evaluatePatientHealthStatus(target);
@@ -293,8 +308,7 @@
                     'Вр.измер.': b['Вр.измер.'] || `${b['Дата'] || ''} ${b['Время'] || ''}`.trim(),
                     'Дата': b['Дата'] || '',
                     'Время': b['Время'] || '',
-                    'Glu': b['Glu'] || '',
-                    'GGT': b['GGT'] || '',
+                    ...b,
                     _hasBiochem: true,
                     _isStandaloneBiochem: true,
                     _biochemSource: b,
@@ -333,8 +347,11 @@
 
             if (candidates.length === 1) {
                 const target = candidates[0];
-                if (b['Glu']) target['Glu'] = b['Glu'];
-                if (b['GGT']) target['GGT'] = b['GGT'];
+                Object.keys(b).forEach(k => {
+                    if (!k.startsWith('_') && b[k] !== undefined && b[k] !== '') {
+                        target[k] = b[k];
+                    }
+                });
                 target._hasBiochem = true;
                 target._biochemSource = b._biochemSource || b;
                 evaluatePatientHealthStatus(target);
@@ -784,7 +801,7 @@
     // Extract Date from Patient Test Time String
     function extractPatientDate(testTimeStr) {
         if (!testTimeStr) return null;
-        const fullMatch = testTimeStr.match(/(\d{2})-(\d{2})-(\d{4})/);
+        const fullMatch = testTimeStr.match(/(\d{2})[.-](\d{2})[.-](\d{4})/);
         if (fullMatch) {
             return {
                 formatted: `${fullMatch[1]}.${fullMatch[2]}.${fullMatch[3]}`,
@@ -794,19 +811,25 @@
         return null;
     }
 
-    // Populate Date Selector with unique dates found in dataset
+    // Populate Date Selector with unique dates found in dataset (SORTED DESCENDING)
     function populateDateFilterOptions() {
         availableDatesMap.clear();
         dateFilterSelect.innerHTML = '<option value="ALL">Всі наявні дати</option>';
 
         parsedPatients.forEach(p => {
-            const dateObj = extractPatientDate(p['Вр.измер.'] || p['Время взят.пр.']);
+            const rawTime = p['Вр.измер.'] || p['Время взят.пр.'] || p['Дата'] || '';
+            const dateObj = extractPatientDate(rawTime);
             if (dateObj) {
                 availableDatesMap.set(dateObj.formatted, dateObj.iso);
             }
         });
 
-        for (const [formatted, iso] of availableDatesMap.entries()) {
+        // Sort dates descending: newest dates (e.g. 2026-08-31, 2026-08-28...) appear first
+        const sortedEntries = Array.from(availableDatesMap.entries()).sort((a, b) => {
+            return b[1].localeCompare(a[1]);
+        });
+
+        for (const [formatted, iso] of sortedEntries) {
             const opt = document.createElement('option');
             opt.value = iso;
             opt.textContent = `Дата: ${formatted}`;
@@ -913,11 +936,15 @@
             if (isBiochemFile) {
                 rowObj._isBiochem = true;
                 if (!rowObj['ID образца.'] && rowObj['SampleID']) rowObj['ID образца.'] = rowObj['SampleID'];
+                if (!rowObj['Штрих-код'] && rowObj['Barcode']) rowObj['Штрих-код'] = rowObj['Barcode'];
+                if (!rowObj['Штрих-код'] && rowObj['BarcodeID']) rowObj['Штрих-код'] = rowObj['BarcodeID'];
+                if (!rowObj['Штрих-код'] && rowObj['Штрихкод']) rowObj['Штрих-код'] = rowObj['Штрихкод'];
                 if (!rowObj['Фамилия'] && rowObj['LastName']) rowObj['Фамилия'] = rowObj['LastName'];
                 if (!rowObj['Имя'] && rowObj['FirstName']) rowObj['Имя'] = rowObj['FirstName'];
                 if (!rowObj['Дата'] && rowObj['Date']) rowObj['Дата'] = rowObj['Date'];
                 if (!rowObj['Время'] && rowObj['Time']) rowObj['Время'] = rowObj['Time'];
             } else {
+                if (!rowObj['Штрих-код'] && rowObj['Barcode']) rowObj['Штрих-код'] = rowObj['Barcode'];
                 if (!rowObj['Имя'] && !rowObj['Фамилия'] && (!sampleID || sampleID === '' || sampleID === '0')) {
                     if (rowObj['WBC'] === '0,00' || rowObj['WBC'] === '0') continue;
                 }
@@ -968,7 +995,7 @@
         }
 
         filteredPatients.forEach((patient, idx) => {
-            const fullName = `${patient['Фамилия'] || ''} ${patient['Имя'] || ''}`.trim() || 'Без імені';
+            const fullName = patient['ФИО'] || `${patient['Фамилия'] || ''} ${patient['Имя'] || ''}`.trim() || 'Без імені';
             const sampleID = patient['ID образца.'] || `№${idx + 1}`;
             const rawTime = patient['Вр.измер.'] || patient['Время взят.пр.'] || patient['Дата'] || '';
             const { dateStr, timeStr } = splitUkrainianDateTime(rawTime);
@@ -1123,50 +1150,80 @@
        PRIMARY FULL CLINICAL REPORT GENERATOR (YELLOW ALERTS REMOVED COMPLETELY)
        ========================================================================== */
     function generateReportHTML(patient) {
-        const fullName = `${patient['Фамилия'] || ''} ${patient['Имя'] || ''}`.trim() || 'Пацієнт';
+        const fullName = patient['ФИО'] || `${patient['Фамилия'] || ''} ${patient['Имя'] || ''}`.trim() || 'Пацієнт';
         const sampleID = patient['ID образца.'] || '—';
-        const rawTestTime = patient['Вр.измер.'] || patient['Время взят.пр.'] || '—';
+        const barcode = patient['Штрих-код'] || patient['Barcode'] || patient._biochemBarcode || '';
+        const rawTestTime = patient['Вр.измер.'] || patient['Время взят.пр.'] || patient['Дата'] || '—';
         const { dateStr, timeStr } = splitUkrainianDateTime(rawTestTime);
 
         // 100% Persistent Base64 Images
         const { wbcImg, rbcImg, pltImg, diffImg } = getPatientImages(patient);
 
-        // Build Table Rows
-        const paramKeys = [
+        function renderParamRow(key, rawVal) {
+            const evalRes = evaluateParameter(key, rawVal);
+            let badgeHTML = '<span class="status-badge norm">В НОРМІ</span>';
+            let resultClass = 'result-norm';
+
+            if (evalRes.flag === 'HIGH') {
+                badgeHTML = '<span class="status-badge high">ВИЩЕ НОРМИ ▲</span>';
+                resultClass = 'result-high';
+            } else if (evalRes.flag === 'LOW') {
+                badgeHTML = '<span class="status-badge low">НИЖЧЕ НОРМИ ▼</span>';
+                resultClass = 'result-low';
+            }
+
+            return `
+                <tr class="${evalRes.flag !== 'NORMAL' ? 'row-abnormal' : ''}">
+                    <td class="param-ukr">${evalRes.ukrName || key}</td>
+                    <td class="param-code">${evalRes.code || key}</td>
+                    <td class="param-val-cell ${resultClass}">${evalRes.valStr} <span class="unit-text">${evalRes.unit || ''}</span></td>
+                    <td class="param-norm-cell">${evalRes.normStr || '—'}</td>
+                    <td class="param-status-cell">${badgeHTML}</td>
+                </tr>
+            `;
+        }
+
+        const hematologyKeys = [
             'WBC', 'Neu%', 'Lym%', 'Mon%', 'Eos%', 'Bas%',
             'Neu#', 'Lym#', 'Mon#', 'Eos#', 'Bas#',
             'RBC', 'HGB', 'HCT', 'MCV', 'MCH', 'MCHC', 'RDW-CV', 'RDW-SD',
-            'PLT', 'MPV', 'PDW', 'PCT', 'P-LCR', 'P-LCC', 'CRP',
-            'Glu', 'GGT'
+            'PLT', 'MPV', 'PDW', 'PCT', 'P-LCR', 'P-LCC', 'CRP'
         ];
 
-        let tableRowsHTML = '';
-        paramKeys.forEach(key => {
-            const rawVal = patient[key];
-            if (rawVal !== undefined && rawVal !== '') {
-                const evalRes = evaluateParameter(key, rawVal);
-                let badgeHTML = '<span class="status-badge norm">В НОРМІ</span>';
-                let resultClass = 'result-norm';
+        const biochemKeys = [
+            'Glu', 'GGT', 'Mg', 'TBil', 'T-Bil-V', 'DBil', 'D-Bil-V', 'ALT', 'AST', 'ALB', 'TP', 'UREA', 'CREA', 'CHOL', 'TG'
+        ];
 
-                if (evalRes.flag === 'HIGH') {
-                    badgeHTML = '<span class="status-badge high">ВИЩЕ НОРМИ ▲</span>';
-                    resultClass = 'result-high';
-                } else if (evalRes.flag === 'LOW') {
-                    badgeHTML = '<span class="status-badge low">НИЖЧЕ НОРМИ ▼</span>';
-                    resultClass = 'result-low';
+        let mainTableRowsHTML = '';
+        let biochemRowsHTML = '';
+
+        if (patient._isStandaloneBiochem) {
+            // Standalone biochem: render all biochem keys in main table
+            biochemKeys.forEach(key => {
+                const rawVal = patient[key];
+                if (rawVal !== undefined && rawVal !== '') {
+                    mainTableRowsHTML += renderParamRow(key, rawVal);
                 }
+            });
+        } else {
+            // CBC Patient: render hematology keys in main table
+            hematologyKeys.forEach(key => {
+                const rawVal = patient[key];
+                if (rawVal !== undefined && rawVal !== '') {
+                    mainTableRowsHTML += renderParamRow(key, rawVal);
+                }
+            });
 
-                tableRowsHTML += `
-                    <tr class="${evalRes.flag !== 'NORMAL' ? 'row-abnormal' : ''}">
-                        <td class="param-ukr">${evalRes.ukrName || key}</td>
-                        <td class="param-code">${evalRes.code || key}</td>
-                        <td class="param-val-cell ${resultClass}">${evalRes.valStr} <span class="unit-text">${evalRes.unit || ''}</span></td>
-                        <td class="param-norm-cell">${evalRes.normStr || '—'}</td>
-                        <td class="param-status-cell">${badgeHTML}</td>
-                    </tr>
-                `;
+            // If biochem is joined, build dedicated biochem rows
+            if (patient._hasBiochem) {
+                biochemKeys.forEach(key => {
+                    const rawVal = patient[key];
+                    if (rawVal !== undefined && rawVal !== '') {
+                        biochemRowsHTML += renderParamRow(key, rawVal);
+                    }
+                });
             }
-        });
+        }
 
         return `
             <div class="report-wrapper">
@@ -1176,7 +1233,7 @@
                         <h2 class="report-main-title">ЗВІТ ЛАБОРАТОРНОГО ДОСЛІДЖЕННЯ</h2>
                     </div>
                     <div class="header-right-info">
-                        <div class="test-type-sub">${patient._isStandaloneBiochem ? 'Біохімічний аналіз (ГГТ, Глю)' : ('Загальний аналіз крові (CBC + 5-DIFF)' + (patient._hasBiochem ? ' + Біохімія' : ''))}</div>
+                        <div class="test-type-sub">${patient._isStandaloneBiochem ? 'Біохімічний аналіз (Глюкоза, ГГТ)' : ('Загальний аналіз крові (CBC + 5-DIFF)' + (patient._hasBiochem ? ' + Біохімія' : ''))}</div>
                         <div class="facility-name">Заклад: МСЧ АРЗ СП ГУ ДСНС України у Харківській області</div>
                     </div>
                 </div>
@@ -1184,7 +1241,8 @@
                 <!-- Unified 3-Column Patient Box (ID Left, Name Center, Time/Date Right) -->
                 <div class="patient-highlight-box-3col">
                     <div class="box-col-left">
-                        <strong>ID зразка:</strong> ${sampleID}
+                        <div><strong>ID зразка:</strong> ${sampleID}</div>
+                        ${barcode ? `<div style="font-size: 8pt; color: #475569; margin-top: 1px;"><strong>Штрих-код:</strong> ${barcode}</div>` : ''}
                     </div>
                     <div class="box-col-center">
                         <div class="patient-full-name">${fullName}</div>
@@ -1195,7 +1253,7 @@
                     </div>
                 </div>
 
-                <!-- Results Table (Col Widths: 34%, 12%, 16%, 18%, 20%) -->
+                <!-- Main Results Table -->
                 <div class="results-section">
                     <table class="results-table">
                         <thead>
@@ -1208,7 +1266,7 @@
                             </tr>
                         </thead>
                         <tbody>
-                            ${tableRowsHTML}
+                            ${mainTableRowsHTML}
                         </tbody>
                     </table>
                 </div>
@@ -1236,6 +1294,29 @@ ${patient._isStandaloneBiochem ? '' : `
                         </div>
                     </div>
                 </div>`}
+
+${(!patient._isStandaloneBiochem && patient._hasBiochem && biochemRowsHTML) ? `
+                <!-- Dedicated Biochemistry Section Under Graphics -->
+                <div class="biochem-section" style="margin-top: 6px; border-top: 1.5px solid #0891b2; padding-top: 4px;">
+                    <div style="font-weight: 800; color: #0f172a; font-size: 8.8pt; margin-bottom: 3px; display: flex; justify-content: space-between; align-items: center;">
+                        <span style="display: inline-flex; align-items: center; gap: 4px;">🧪 Біохімічний аналіз</span>
+                        ${barcode ? `<span style="font-size: 8pt; font-weight: 700; color: #475569; font-family: 'Roboto Mono', monospace;">Штрих-код: ${barcode}</span>` : ''}
+                    </div>
+                    <table class="results-table">
+                        <thead>
+                            <tr>
+                                <th style="width: 34%;">Показник (назва)</th>
+                                <th style="width: 12%;">Абревіатура</th>
+                                <th style="width: 16%;">Результат</th>
+                                <th style="width: 18%;">Норма (референс)</th>
+                                <th style="width: 20%;">Статус / Відхилення</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${biochemRowsHTML}
+                        </tbody>
+                    </table>
+                </div>` : ''}
 
                 <!-- Signatures -->
                 <div class="report-footer">
