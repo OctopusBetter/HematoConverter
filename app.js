@@ -57,7 +57,7 @@
         'P-LCR': { ukrName: 'Частка великих тромбоцитів', code: 'P-LCR', unit: '%', min: 15.0, max: 35.0 },
         'P-LCC': { ukrName: 'Кількість великих тромбоцитів', code: 'P-LCC', unit: '10⁹/л', min: 30, max: 90 },
         'CRP': { ukrName: 'С-реактивний білок', code: 'CRP', unit: 'мг/л', min: 0.0, max: 5.0 },
-        'Glu': { ukrName: 'Глюкоза (сироватка)', code: 'Glu', unit: 'ммоль/л', min: 4.10, max: 5.90 },
+        'Glu': { ukrName: 'Глюкоза (сироватка)', code: 'Glu', unit: 'ммоль/л', min: 4.10, max: 6.10 },
         'GGT': { ukrName: 'Гамма-глутамілтрансфераза (ГГТ)', code: 'GGT', unit: 'Од/л', min: 10.0, max: 50.0 },
         'Mg': { ukrName: 'Магній (сироватка)', code: 'Mg', unit: 'ммоль/л', min: 0.66, max: 1.07 },
         'TBil': { ukrName: 'Білірубін загальний', code: 'T-Bil', unit: 'мкмоль/л', min: 3.4, max: 20.5 },
