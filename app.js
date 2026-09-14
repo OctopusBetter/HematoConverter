@@ -1299,7 +1299,7 @@ ${(!patient._isStandaloneBiochem && patient._hasBiochem && biochemRowsHTML) ? `
                 <!-- Dedicated Biochemistry Section Under Graphics -->
                 <div class="biochem-section" style="margin-top: 6px; border-top: 1.5px solid #0891b2; padding-top: 4px;">
                     <div style="font-weight: 800; color: #0f172a; font-size: 8.8pt; margin-bottom: 3px; display: flex; justify-content: space-between; align-items: center;">
-                        <span style="display: inline-flex; align-items: center; gap: 4px;">🧪 Біохімічний аналіз</span>
+                        <span>Біохімічний аналіз</span>
                         ${barcode ? `<span style="font-size: 8pt; font-weight: 700; color: #475569; font-family: 'Roboto Mono', monospace;">Штрих-код: ${barcode}</span>` : ''}
                     </div>
                     <table class="results-table">
