@@ -240,6 +240,175 @@ body {
     border: 1px solid var(--border-color);
 }
 
+/* ==========================================================================
+   REAL-TIME IMPORT PROGRESS BAR COMPONENT (CAPSULE THEME)
+   ========================================================================== */
+.import-progress-card {
+    margin: 1.5rem auto 0;
+    max-width: 620px;
+    background: rgba(15, 23, 42, 0.95);
+    border: 1px solid rgba(6, 182, 212, 0.4);
+    border-radius: 16px;
+    padding: 1.25rem 1.5rem;
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.6), 0 0 15px rgba(6, 182, 212, 0.15);
+    text-align: left;
+    position: relative;
+    z-index: 20;
+    pointer-events: auto;
+    animation: fadeInProgress 0.25s ease-out;
+}
+
+@keyframes fadeInProgress {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.upload-card-capsule.is-importing {
+    cursor: wait;
+    border-color: var(--accent-cyan);
+}
+
+.upload-card-capsule.is-importing .file-input {
+    pointer-events: none;
+}
+
+.import-progress-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.85rem;
+}
+
+.progress-title-group {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+}
+
+.progress-pulse-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background-color: var(--accent-cyan);
+    box-shadow: 0 0 10px var(--accent-cyan);
+    animation: pulseGlow 1.4s infinite ease-in-out;
+    flex-shrink: 0;
+}
+
+.progress-pulse-dot.completed {
+    background-color: var(--accent-emerald);
+    box-shadow: 0 0 10px var(--accent-emerald);
+    animation: none;
+}
+
+@keyframes pulseGlow {
+    0%, 100% { transform: scale(0.9); opacity: 0.6; }
+    50% { transform: scale(1.2); opacity: 1; }
+}
+
+.progress-stage-label {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: #f1f5f9;
+}
+
+.progress-percent-badge {
+    font-family: 'Roboto Mono', monospace;
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: #38bdf8;
+    background: rgba(6, 182, 212, 0.15);
+    padding: 0.2rem 0.65rem;
+    border-radius: var(--radius-pill);
+    border: 1px solid rgba(6, 182, 212, 0.3);
+}
+
+.import-progress-track {
+    width: 100%;
+    height: 12px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: var(--radius-pill);
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.4);
+    position: relative;
+}
+
+.import-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #06b6d4, #0284c7, #38bdf8);
+    border-radius: var(--radius-pill);
+    transition: width 0.15s ease-out;
+    position: relative;
+    overflow: hidden;
+}
+
+.import-progress-fill::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35), transparent);
+    animation: progressShimmer 1.5s infinite;
+}
+
+@keyframes progressShimmer {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+}
+
+.import-progress-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 0.85rem;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.progress-count-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+
+.progress-count-text {
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: #e2e8f0;
+}
+
+.progress-detail-text {
+    font-size: 0.78rem;
+    color: #94a3b8;
+    max-width: 340px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.progress-eta-info {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-family: 'Roboto Mono', monospace;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: #fbbf24;
+    background: rgba(251, 191, 36, 0.1);
+    border: 1px solid rgba(251, 191, 36, 0.25);
+    padding: 0.3rem 0.75rem;
+    border-radius: var(--radius-pill);
+}
+
+.progress-eta-info.completed {
+    color: #34d399;
+    background: rgba(52, 211, 153, 0.1);
+    border-color: rgba(52, 211, 153, 0.3);
+}
+
 /* Compact Top Bar */
 .compact-folder-bar-capsule {
     background: var(--bg-card);

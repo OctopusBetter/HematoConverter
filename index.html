@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Гематоконвертер | Лабораторна діагностика</title>
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css?v=2.4">
     <!-- Google Fonts for clinical typography -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -56,6 +56,32 @@
                 </div>
 
                 <div class="file-status-pill" id="mainFolderStatus">Папку не обрано</div>
+
+                <!-- Real-time Import Progress Bar Component -->
+                <div class="import-progress-card" id="importProgressContainer" style="display: none;">
+                    <div class="import-progress-header">
+                        <div class="progress-title-group">
+                            <span class="progress-pulse-dot" id="progressPulseDot"></span>
+                            <span class="progress-stage-label" id="progressStageLabel">Імпорт файлів та графіків...</span>
+                        </div>
+                        <span class="progress-percent-badge" id="progressPercentBadge">0%</span>
+                    </div>
+
+                    <div class="import-progress-track">
+                        <div class="import-progress-fill" id="importProgressFill" style="width: 0%;"></div>
+                    </div>
+
+                    <div class="import-progress-footer">
+                        <div class="progress-count-info">
+                            <span class="progress-count-text" id="progressCountText">Імпортовано: 0 з 0</span>
+                            <span class="progress-detail-text" id="progressDetailText"></span>
+                        </div>
+                        <div class="progress-eta-info" id="progressEtaBadge">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                            <span id="progressEtaText">Розрахунок часу...</span>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <!-- Compact Collapsed Top Bar -->
@@ -172,6 +198,6 @@
     <div id="customContextMenu" class="custom-context-menu" style="display: none;"></div>
 
     <!-- Application Script -->
-    <script src="app.js?v=2.3"></script>
+    <script src="app.js?v=2.4"></script>
 </body>
 </html>

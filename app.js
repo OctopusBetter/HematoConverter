@@ -28,6 +28,8 @@
     let patientCountBadge, workspace, patientList, patientSearch;
     let totalPatients, currentPatientTitle, singleReportContainer, printContainer;
     let dateFilterSelect, datePickerInput, clearDateBtn, statusFilterSelect, clearDbBtn;
+    let importProgressContainer, progressStageLabel, progressPercentBadge;
+    let importProgressFill, progressCountText, progressDetailText, progressEtaText, progressEtaBadge, progressPulseDot;
 
     // Parameter Dictionary: Ukrainian Descriptive Names & Units
     const PARAMETER_INFO = {
@@ -558,6 +560,15 @@
         clearDateBtn = document.getElementById('clearDateBtn');
         statusFilterSelect = document.getElementById('statusFilterSelect');
         clearDbBtn = document.getElementById('clearDbBtn');
+        importProgressContainer = document.getElementById('importProgressContainer');
+        progressStageLabel = document.getElementById('progressStageLabel');
+        progressPercentBadge = document.getElementById('progressPercentBadge');
+        importProgressFill = document.getElementById('importProgressFill');
+        progressCountText = document.getElementById('progressCountText');
+        progressDetailText = document.getElementById('progressDetailText');
+        progressEtaText = document.getElementById('progressEtaText');
+        progressEtaBadge = document.getElementById('progressEtaBadge');
+        progressPulseDot = document.getElementById('progressPulseDot');
 
         if (mainFolderInput) mainFolderInput.addEventListener('change', handleFolderSelect);
 
@@ -602,6 +613,52 @@
         initDB();
     }
 
+    /* ==========================================================================
+       REAL-TIME IMPORT PROGRESS & ETA TRACKER
+       ========================================================================== */
+    function showImportProgress(stageText, countText, percent = 0, detailText = '', etaText = 'Розрахунок часу...') {
+        if (!importProgressContainer) return;
+        if (mainFolderDropZone) {
+            mainFolderDropZone.classList.add('is-importing');
+            mainFolderDropZone.style.display = 'block';
+        }
+        if (compactFolderBar) compactFolderBar.style.display = 'none';
+        if (uploadSection) uploadSection.classList.remove('compact');
+        if (mainFolderStatus) mainFolderStatus.style.display = 'none';
+
+        importProgressContainer.style.display = 'block';
+        if (progressPulseDot) progressPulseDot.classList.remove('completed');
+        if (progressEtaBadge) progressEtaBadge.classList.remove('completed');
+
+        updateImportProgress(stageText, countText, percent, detailText, etaText);
+    }
+
+    function updateImportProgress(stageText, countText, percent = 0, detailText = '', etaText = '') {
+        if (progressStageLabel && stageText) progressStageLabel.textContent = stageText;
+        if (progressCountText && countText) progressCountText.textContent = countText;
+        if (progressPercentBadge) progressPercentBadge.textContent = `${percent}%`;
+        if (importProgressFill) importProgressFill.style.width = `${percent}%`;
+        if (progressDetailText) progressDetailText.textContent = detailText;
+        if (progressEtaText && etaText) progressEtaText.textContent = etaText;
+    }
+
+    function hideImportProgress() {
+        if (importProgressContainer) importProgressContainer.style.display = 'none';
+        if (mainFolderDropZone) mainFolderDropZone.classList.remove('is-importing');
+        if (mainFolderStatus) mainFolderStatus.style.display = 'inline-block';
+    }
+
+    function formatEtaTime(seconds) {
+        if (seconds <= 0) return 'Завершення...';
+        const rounded = Math.round(seconds);
+        if (rounded < 4) return 'кілька секунд';
+        if (rounded < 60) return `~${rounded} сек`;
+        const mins = Math.floor(rounded / 60);
+        const secs = rounded % 60;
+        if (secs === 0) return `~${mins} хв`;
+        return `~${mins} хв ${secs} сек`;
+    }
+
     // Silent Drag and Drop Helper
     function setupSilentDragAndDrop(zone) {
         ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
@@ -619,6 +676,15 @@
         zone.addEventListener('drop', async (e) => {
             const items = e.dataTransfer.items;
             if (!items) return;
+
+            showImportProgress(
+                'Зчитування вмісту папки...',
+                'Сканування файлової системи...',
+                0,
+                'Пошук файлів результатів та графіків...',
+                'Розрахунок часу...'
+            );
+            await new Promise(r => setTimeout(r, 0));
 
             const files = [];
 
@@ -660,7 +726,9 @@
 
             await Promise.all(promises);
             if (files.length > 0) {
-                processFolderFiles(files);
+                await processFolderFiles(files);
+            } else {
+                hideImportProgress();
             }
         });
     }
@@ -687,16 +755,29 @@
         });
 
         if (csvFiles.length === 0) {
-            mainFolderStatus.textContent = `Папка містить ${pngFiles.length} графіків, але CSV-файли результатів не знайдено.`;
+            hideImportProgress();
+            if (mainFolderStatus) {
+                mainFolderStatus.textContent = `Папка містить ${pngFiles.length} графіків, але CSV-файли результатів не знайдено.`;
+                mainFolderStatus.style.display = 'inline-block';
+            }
             return;
         }
 
-        mainFolderStatus.textContent = `Обробка та збереження ${csvFiles.length} файлів результатів та графіків...`;
+        showImportProgress(
+            'Зчитування файлів...',
+            `Зчитано файлів: 0 з ${csvFiles.length}`,
+            0,
+            `Знайдено графіків у папці: ${pngFiles.length}`,
+            'Розрахунок часу...'
+        );
+        await new Promise(r => setTimeout(r, 0));
 
         let newHematologyPatients = [];
         let newBiochemRecords = [];
 
-        for (const csvFile of csvFiles) {
+        // Phase 1: Read all CSV files
+        for (let cIdx = 0; cIdx < csvFiles.length; cIdx++) {
+            const csvFile = csvFiles[cIdx];
             const text = await new Promise((resolve) => {
                 const reader = new FileReader();
                 reader.onload = e => resolve(e.target.result);
@@ -711,12 +792,82 @@
                     newHematologyPatients.push(row);
                 }
             });
+
+            if (csvFiles.length > 1) {
+                const csvPercent = Math.round(((cIdx + 1) / csvFiles.length) * 10);
+                updateImportProgress(
+                    'Зчитування CSV-файлів...',
+                    `Файлів CSV: ${cIdx + 1} з ${csvFiles.length}`,
+                    csvPercent,
+                    `Файл: ${csvFile.name} (рядків: ${parsedRows.length})`,
+                    'Розрахунок часу...'
+                );
+                await new Promise(r => setTimeout(r, 0));
+            }
         }
 
-        // Attach PNG Base64 Data URLs to each hematology patient
-        for (const patient of newHematologyPatients) {
-            await attachImagesToPatient(patient);
+        // Phase 2: Attach PNG Base64 Data URLs to each hematology patient
+        const totalPatients = newHematologyPatients.length;
+        let attachedGraphsTotal = 0;
+
+        if (totalPatients > 0) {
+            const startTime = performance.now();
+            let smoothedEta = null;
+
+            for (let i = 0; i < totalPatients; i++) {
+                const patient = newHematologyPatients[i];
+                const sampleID = patient['ID образца.'] || '—';
+                const surname = patient['Фамилия'] || patient['ФИО'] || '';
+                const pName = surname ? `${surname} (ID: ${sampleID})` : `ID: ${sampleID}`;
+
+                const attachedCount = await attachImagesToPatient(patient);
+                attachedGraphsTotal += (attachedCount || 0);
+
+                const currentCount = i + 1;
+                const basePercent = csvFiles.length > 1 ? 10 : 0;
+                const percentSpan = 95 - basePercent;
+                const percent = Math.min(95, basePercent + Math.round((currentCount / totalPatients) * percentSpan));
+
+                const elapsedSec = (performance.now() - startTime) / 1000;
+                let etaStr = 'Розрахунок часу...';
+                if (currentCount >= 2 && elapsedSec > 0.2) {
+                    const rate = currentCount / elapsedSec;
+                    const remaining = totalPatients - currentCount;
+                    const rawEta = remaining / rate;
+                    smoothedEta = smoothedEta === null ? rawEta : (0.7 * smoothedEta + 0.3 * rawEta);
+                    etaStr = formatEtaTime(smoothedEta);
+                }
+
+                updateImportProgress(
+                    'Імпорт результатів та графіків...',
+                    `Імпортовано: ${currentCount} з ${totalPatients}`,
+                    percent,
+                    `Обробка: ${pName} • Графіків: ${attachedGraphsTotal}`,
+                    etaStr
+                );
+
+                await new Promise(r => setTimeout(r, 0));
+            }
+        } else if (newBiochemRecords.length > 0) {
+            updateImportProgress(
+                'Обробка біохімічних даних...',
+                `Записів біохімії: ${newBiochemRecords.length}`,
+                85,
+                'Аналіз параметрів Glu / GGT...',
+                'менше 5 сек'
+            );
+            await new Promise(r => setTimeout(r, 0));
         }
+
+        // Phase 3: Finalizing reconciliation & sorting
+        updateImportProgress(
+            'Об\'єднання та звірка результатів...',
+            `Оброблено: ${totalPatients || newBiochemRecords.length}`,
+            97,
+            'Звірка біохімії та сортування за патологією...',
+            'Завершення...'
+        );
+        await new Promise(r => setTimeout(r, 0));
 
         // Combine with existing parsed patients, avoiding duplicates
         const existingKeys = new Set(parsedPatients.map(p => p.uniqueKey || `${p['ID образца.']}_${p['Вр.измер.'] || p['Время взят.пр.']}`));
@@ -753,11 +904,26 @@
         // Persist to native IndexedDB (with full Base64 images!)
         savePatientsToDB(parsedPatients);
 
+        // Completion state: 100%
+        if (progressPulseDot) progressPulseDot.classList.add('completed');
+        if (progressEtaBadge) progressEtaBadge.classList.add('completed');
+        updateImportProgress(
+            '✅ Імпорт успішно завершено!',
+            `Всього імпортовано: ${parsedPatients.length} пацієнтів`,
+            100,
+            attachedGraphsTotal > 0 ? `Прикріплено графіків: ${attachedGraphsTotal}` : 'Дані оновлено',
+            'Готово'
+        );
+
         const statusText = `Успішно завантажено та збережено ${parsedPatients.length} пацієнтів`;
-        mainFolderStatus.textContent = statusText;
-        compactFolderText.textContent = statusText;
+        if (mainFolderStatus) mainFolderStatus.textContent = statusText;
+        if (compactFolderText) compactFolderText.textContent = statusText;
+
+        // Brief delay (700ms) so user can see completion state
+        await new Promise(r => setTimeout(r, 700));
 
         // Collapse Upload Section
+        hideImportProgress();
         uploadSection.classList.add('compact');
         mainFolderDropZone.style.display = 'none';
         compactFolderBar.style.display = 'flex';
@@ -792,10 +958,12 @@
             }
         }
 
-        if (wbcFile) patient.wbcImgData = await fileToBase64(wbcFile);
-        if (rbcFile) patient.rbcImgData = await fileToBase64(rbcFile);
-        if (pltFile) patient.pltImgData = await fileToBase64(pltFile);
-        if (diffFile) patient.diffImgData = await fileToBase64(diffFile);
+        let count = 0;
+        if (wbcFile) { patient.wbcImgData = await fileToBase64(wbcFile); count++; }
+        if (rbcFile) { patient.rbcImgData = await fileToBase64(rbcFile); count++; }
+        if (pltFile) { patient.pltImgData = await fileToBase64(pltFile); count++; }
+        if (diffFile) { patient.diffImgData = await fileToBase64(diffFile); count++; }
+        return count;
     }
 
     // Extract Date from Patient Test Time String
