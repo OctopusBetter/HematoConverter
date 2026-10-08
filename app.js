@@ -20,6 +20,8 @@
     let linkModal, modalTitle, modalBiochemDetails, closeModalBtn, modalPatientSearch, modalPatientList;
     let customContextMenu, unlinkBiochemBtn;
 
+    const GLU_OFFSET = -2.0;
+
 
     // DOM Elements
     let mainFolderInput, mainFolderDropZone, mainFolderStatus, uploadSection;
@@ -295,6 +297,7 @@
                 });
                 target._hasBiochem = true;
                 target._biochemSource = b;
+                if (b._rawGlu !== undefined) target._rawGlu = b._rawGlu;
                 evaluatePatientHealthStatus(target);
             } else {
                 // Create Standalone Biochemistry Patient
@@ -356,6 +359,7 @@
                 });
                 target._hasBiochem = true;
                 target._biochemSource = b._biochemSource || b;
+                if (b._rawGlu !== undefined) target._rawGlu = b._rawGlu;
                 evaluatePatientHealthStatus(target);
                 biochemsToRemove.add(b.uniqueKey);
             }
@@ -378,12 +382,14 @@
             'Имя': patient['Имя'],
             'Дата': extractComparableDate(patient['Вр.измер.'] || patient['Время взят.пр.']),
             'Glu': patient['Glu'],
+            '_rawGlu': patient._rawGlu,
             'GGT': patient['GGT']
         };
 
         // Remove biochem from CBC patient
         delete patient['Glu'];
         delete patient['GGT'];
+        delete patient._rawGlu;
         patient._hasBiochem = false;
         delete patient._biochemSource;
         evaluatePatientHealthStatus(patient);
@@ -500,6 +506,7 @@
         if (!activeModalBiochemItem || !targetPatient) return;
 
         if (activeModalBiochemItem['Glu']) targetPatient['Glu'] = activeModalBiochemItem['Glu'];
+        if (activeModalBiochemItem._rawGlu) targetPatient._rawGlu = activeModalBiochemItem._rawGlu;
         if (activeModalBiochemItem['GGT']) targetPatient['GGT'] = activeModalBiochemItem['GGT'];
         targetPatient._hasBiochem = true;
         targetPatient._biochemSource = activeModalBiochemItem._biochemSource || activeModalBiochemItem;
@@ -608,6 +615,12 @@
 
         if (printAllBtn) printAllBtn.addEventListener('click', printAllReports);
         if (printCurrentBtn) printCurrentBtn.addEventListener('click', printCurrentReport);
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                if (linkModal && linkModal.style.display !== 'none') closeLinkModal();
+            }
+        });
 
         // Initialize Native IndexedDB Storage
         initDB();
@@ -1071,6 +1084,7 @@
     }
 
     // CSV Parser Supporting Quoted CSV strings (HANDLES BOTH HEMATOLOGY & BIOCHEMISTRY)
+    window.parseCSVText = parseCSVText;
     function parseCSVText(csvText) {
         const lines = csvText.split(/\r?\n/).filter(line => line.trim() !== '');
         if (lines.length < 2) return [];
@@ -1115,6 +1129,25 @@
                 if (!rowObj['Штрих-код'] && rowObj['Barcode']) rowObj['Штрих-код'] = rowObj['Barcode'];
                 if (!rowObj['Имя'] && !rowObj['Фамилия'] && (!sampleID || sampleID === '' || sampleID === '0')) {
                     if (rowObj['WBC'] === '0,00' || rowObj['WBC'] === '0') continue;
+                }
+            }
+
+            const gluOffset = GLU_OFFSET;
+            const gluKey = Object.keys(rowObj).find(k => {
+                const lk = k.trim().toLowerCase();
+                return lk === 'glu' || lk === 'глюкоза';
+            });
+            if (gluKey && rowObj[gluKey] !== undefined && rowObj[gluKey] !== '') {
+                rowObj._rawGlu = rowObj[gluKey];
+                if (gluOffset !== 0) {
+                    const rawNum = parseFloat(String(rowObj[gluKey]).replace(',', '.'));
+                    if (!isNaN(rawNum)) {
+                        const adjusted = Math.max(0, rawNum + gluOffset);
+                        rowObj[gluKey] = adjusted.toFixed(2);
+                    }
+                }
+                if (gluKey !== 'Glu' && !rowObj['Glu']) {
+                    rowObj['Glu'] = rowObj[gluKey];
                 }
             }
 
